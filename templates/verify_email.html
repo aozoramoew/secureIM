@@ -1,0 +1,14 @@
+{% extends "base.html" %}
+{% block title %}Email Verified — SecureIM{% endblock %}
+{% block body %}
+<main class="verify-page">
+  <div class="verify-card">
+    <div class="verify-icon">✅</div>
+    <h1 style="font-size:22px;margin-bottom:8px;">Email Verified!</h1>
+    <p style="color:var(--text-muted);margin-bottom:24px;">
+      Your account is now active. You can close this tab and sign in.
+    </p>
+    <a href="/login" class="btn btn-primary" style="display:inline-flex;width:auto;">Go to Sign In</a>
+  </div>
+</main>
+{% endblock %}

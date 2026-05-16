@@ -1,0 +1,59 @@
+{% extends "base.html" %}
+{% block title %}Create Account — SecureIM{% endblock %}
+{% block description %}Register a new SecureIM end-to-end encrypted messaging account{% endblock %}
+
+{% block body %}
+<main class="auth-page">
+  <div class="auth-card">
+    <div class="auth-logo">
+      <div class="logo-icon">🔒</div>
+      <span class="logo-text">SecureIM</span>
+    </div>
+
+    <h1 class="auth-title">Create account</h1>
+    <p class="auth-subtitle">Your keys are generated in your browser — we never see your private key.</p>
+
+    <form id="register-form" novalidate>
+      <div class="form-group">
+        <label for="reg-username">Username</label>
+        <input id="reg-username" class="form-control" type="text"
+               placeholder="3–30 characters" autocomplete="username" required>
+      </div>
+      <div class="form-group">
+        <label for="reg-email">Email</label>
+        <input id="reg-email" class="form-control" type="email"
+               placeholder="you@example.com" autocomplete="email" required>
+      </div>
+      <div class="form-group">
+        <label for="reg-password">Password</label>
+        <input id="reg-password" class="form-control" type="password"
+               placeholder="At least 8 characters" autocomplete="new-password" required>
+      </div>
+      <div class="form-group">
+        <label for="reg-confirm">Confirm Password</label>
+        <input id="reg-confirm" class="form-control" type="password"
+               placeholder="Repeat password" autocomplete="new-password" required>
+      </div>
+
+      <p style="font-size:12px;color:var(--text-muted);margin-bottom:16px;">
+        🔑 Your password also encrypts your private keys locally (PBKDF2 + AES-256-GCM).
+        Choose a strong, memorable password — it cannot be recovered.
+      </p>
+
+      <button id="reg-btn" type="submit" class="btn btn-primary">Create Account</button>
+    </form>
+
+    <div id="reg-status" class="status-msg"></div>
+
+    <div class="auth-footer">
+      Already have an account? <a href="/login">Sign in</a>
+    </div>
+  </div>
+</main>
+{% endblock %}
+
+{% block scripts %}
+<script src="/static/js/crypto.js"></script>
+<script src="/static/js/storage.js"></script>
+<script src="/static/js/auth.js"></script>
+{% endblock %}

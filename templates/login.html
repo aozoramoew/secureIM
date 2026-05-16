@@ -1,0 +1,54 @@
+{% extends "base.html" %}
+{% block title %}Sign In — SecureIM{% endblock %}
+{% block description %}Sign in to your SecureIM encrypted messaging account{% endblock %}
+
+{% block body %}
+<main class="auth-page">
+  <div class="auth-card">
+    <div class="auth-logo">
+      <div class="logo-icon">🔒</div>
+      <span class="logo-text">SecureIM</span>
+    </div>
+
+    <h1 class="auth-title">Welcome back</h1>
+    <p class="auth-subtitle">Sign in to your encrypted account</p>
+
+    <form id="login-form" novalidate>
+      <div class="form-group">
+        <label for="login-username">Username</label>
+        <input id="login-username" class="form-control" type="text"
+               placeholder="Enter your username" autocomplete="username" required>
+      </div>
+      <div class="form-group">
+        <label for="login-password">Password</label>
+        <input id="login-password" class="form-control" type="password"
+               placeholder="Enter your password" autocomplete="current-password" required>
+      </div>
+      <button id="login-btn" type="submit" class="btn btn-primary">Sign In</button>
+    </form>
+
+    <!-- 2FA Waiting Screen -->
+    <div id="2fa-waiting">
+      <div class="pulse-icon">📧</div>
+      <h2 style="font-size:18px;">Check your email</h2>
+      <p style="color:var(--text-muted);font-size:14px;">
+        A device authorization link has been sent to your email.<br>
+        Click the link to complete sign in.
+      </p>
+      <button id="cancel-2fa-btn" class="btn btn-ghost" style="width:auto;">Cancel</button>
+    </div>
+
+    <div id="login-status" class="status-msg"></div>
+
+    <div class="auth-footer">
+      Don't have an account? <a href="/register">Create one</a>
+    </div>
+  </div>
+</main>
+{% endblock %}
+
+{% block scripts %}
+<script src="/static/js/crypto.js"></script>
+<script src="/static/js/storage.js"></script>
+<script src="/static/js/auth.js"></script>
+{% endblock %}

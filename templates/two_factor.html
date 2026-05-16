@@ -1,0 +1,15 @@
+{% extends "base.html" %}
+{% block title %}Two-Factor Auth — SecureIM{% endblock %}
+{% block body %}
+<main class="verify-page">
+  <div class="verify-card">
+    <div class="verify-icon">📧</div>
+    <h1 style="font-size:22px;margin-bottom:8px;">Check Your Email</h1>
+    <p style="color:var(--text-muted);margin-bottom:24px;">
+      A device authorization link has been sent to your email.<br>
+      Click the link to authorize this device (expires in 15 minutes).
+    </p>
+    <a href="/login" class="btn btn-ghost" style="display:inline-flex;width:auto;">Back to Login</a>
+  </div>
+</main>
+{% endblock %}

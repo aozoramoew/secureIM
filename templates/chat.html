@@ -1,0 +1,176 @@
+{% extends "base.html" %}
+{% block title %}Chat — SecureIM{% endblock %}
+{% block description %}SecureIM end-to-end encrypted real-time chat{% endblock %}
+
+{% block body %}
+<!-- Password Unlock Overlay -->
+<div id="unlock-overlay">
+  <div class="unlock-card">
+    <div class="unlock-icon">🔐</div>
+    <h2 style="margin-bottom:8px;">Unlock Your Keys</h2>
+    <p style="color:var(--text-muted);font-size:14px;margin-bottom:20px;">
+      Enter your password to decrypt your local identity keys
+    </p>
+    <input id="unlock-password" class="form-control" type="password"
+           placeholder="Your password" autocomplete="current-password"
+           style="margin-bottom:12px;" onkeydown="if(event.key==='Enter')document.getElementById('unlock-btn').click()">
+    <button id="unlock-btn" class="btn btn-primary">Unlock</button>
+  </div>
+</div>
+
+<!-- Group Creation Modal -->
+<div id="group-modal" class="modal-overlay">
+  <div class="modal-card">
+    <h2 class="modal-title">➕ Create Group</h2>
+    <div class="form-group">
+      <label>Group Name</label>
+      <input id="new-group-name" class="form-control" type="text" placeholder="e.g. Team Alpha">
+    </div>
+    <div class="form-group">
+      <label>Select Members</label>
+      <div id="member-list" style="max-height:200px;overflow-y:auto;"></div>
+    </div>
+    <div style="display:flex;gap:10px;margin-top:16px;">
+      <button id="create-group-btn" class="btn btn-primary" style="flex:1;">Create</button>
+      <button class="btn btn-ghost" onclick="closeModal('group-modal')" style="flex:0 0 auto;width:auto;">Cancel</button>
+    </div>
+  </div>
+</div>
+
+<!-- Alert Toast -->
+<div id="chat-alert" class="chat-alert"></div>
+
+<!-- Main Chat App -->
+<div class="chat-app">
+
+  <!-- ── Sidebar ── -->
+  <aside class="sidebar">
+    <div class="sidebar-header">
+      <span class="sidebar-logo">🔒 SecureIM</span>
+      <button id="logout-btn" class="btn btn-ghost"
+              style="padding:6px 12px;font-size:12px;width:auto;">Logout</button>
+    </div>
+
+    <div class="user-info">
+      <div class="user-avatar" id="user-avatar-letter">?</div>
+      <div>
+        <div class="user-name" id="current-username">Loading…</div>
+        <div style="font-size:11px;color:var(--success);">● Online</div>
+      </div>
+    </div>
+
+    <div class="sidebar-search">
+      <input id="search-input" type="search" placeholder="🔍 Search users…" autocomplete="off">
+    </div>
+
+    <!-- Direct Messages -->
+    <div class="sidebar-section">
+      <span>Direct Messages</span>
+    </div>
+    <ul id="contacts-list" class="contacts-list"></ul>
+
+    <!-- Groups -->
+    <div class="sidebar-section">
+      <span>Groups</span>
+      <button title="New group" onclick="openGroupModal()">＋</button>
+    </div>
+    <ul id="groups-list" class="contacts-list"></ul>
+
+    <!-- Settings -->
+    <div class="settings-panel">
+      <div class="sidebar-section" style="padding:0 0 8px;">
+        <span>Privacy Settings</span>
+      </div>
+      <div class="toggle-row">
+        <span class="toggle-label" title="Save encrypted chat history to local storage">Store History</span>
+        <label class="toggle-switch">
+          <input type="checkbox" id="toggle-store-history" checked>
+          <span class="toggle-track"></span>
+        </label>
+      </div>
+      <div class="toggle-row">
+        <span class="toggle-label" title="Current session messages lost on refresh. Older history kept.">Session Mode</span>
+        <label class="toggle-switch">
+          <input type="checkbox" id="toggle-session-mode">
+          <span class="toggle-track"></span>
+        </label>
+      </div>
+    </div>
+  </aside>
+
+  <!-- ── Chat Area ── -->
+  <div style="flex:1;display:flex;flex-direction:column;overflow:hidden;">
+
+    <!-- No conversation selected -->
+    <div id="no-chat-placeholder" class="no-chat-placeholder" style="display:flex;">
+      <div class="big-icon">🔒</div>
+      <p>Select a contact or group to start chatting</p>
+      <p style="font-size:14px;color:var(--text-muted);">All messages are end-to-end encrypted</p>
+    </div>
+
+    <!-- Active conversation -->
+    <div id="chat-main" class="chat-main" style="display:none;">
+
+      <div id="conn-banner"></div>
+
+      <header class="chat-header">
+        <div>
+          <div id="chat-header-name" class="chat-header-name">—</div>
+          <div id="typing-indicator">typing…</div>
+        </div>
+        <span id="enc-status-badge" class="enc-badge pending">⏳ Establishing…</span>
+        <button class="btn btn-ghost"
+                style="padding:6px 10px;font-size:12px;width:auto;"
+                onclick="verifyActiveContact()">Verify Keys</button>
+      </header>
+
+      <div id="messages-container" class="messages-container"></div>
+
+      <div class="input-area">
+        <textarea id="message-input" placeholder="Type a message… (Enter to send)"
+                  rows="1" autocomplete="off"></textarea>
+        <button id="send-btn" title="Send message">➤</button>
+      </div>
+    </div>
+  </div>
+</div>
+{% endblock %}
+
+{% block scripts %}
+<script src="https://cdn.socket.io/4.7.5/socket.io.min.js"></script>
+<script src="/static/js/crypto.js"></script>
+<script src="/static/js/storage.js"></script>
+<script src="/static/js/chat.js"></script>
+<script>
+  function openGroupModal() {
+    // Populate member list from current contacts
+    const list = document.getElementById('member-list');
+    list.innerHTML = '';
+    document.querySelectorAll('#contacts-list .contact-item').forEach(li => {
+      const uid  = li.dataset.userId;
+      const name = li.querySelector('.contact-name')?.textContent || '';
+      if (!uid) return;
+      const label = document.createElement('label');
+      label.style.cssText = 'display:flex;align-items:center;gap:8px;padding:6px;cursor:pointer;';
+      label.innerHTML = `<input type="checkbox" class="member-check" value="${uid}">
+                         <span>${name}</span>`;
+      list.appendChild(label);
+    });
+    document.getElementById('group-modal').classList.add('open');
+  }
+
+  function verifyActiveContact() {
+    if (!activeConversation || activeConversation.type !== 'dm') return;
+    verifyContact(activeConversation.id, activeConversation.username);
+  }
+
+  // Update avatar letter when user loads
+  document.addEventListener('DOMContentLoaded', () => {
+    const user = SecureStorage.getUser();
+    if (user) {
+      const el = document.getElementById('user-avatar-letter');
+      if (el) el.textContent = user.username[0].toUpperCase();
+    }
+  });
+</script>
+{% endblock %}

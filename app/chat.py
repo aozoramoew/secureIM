@@ -24,7 +24,7 @@ SocketIO events (authenticated via JWT in auth header):
   typing                {recipient_id or group_id}
 """
 import json
-from datetime import datetime
+from datetime import datetime, timedelta
 from functools import wraps
 
 from flask import Blueprint, request, jsonify, current_app
@@ -164,6 +164,10 @@ def delete_message(current_user, current_device, msg_id):
         msg.is_deep_deleted = True
         msg.deep_deleted_at = datetime.utcnow()
         msg.deep_deleted_by = current_user.id
+        # Immediately wipe the ciphertext — server holds zero plaintext or payload.
+        # The tombstone row (is_deep_deleted=True) remains so both clients
+        # permanently display "🗑️ This message was deleted."
+        msg.encrypted_payloads = '{}'
         db.session.commit()
 
         # Notify all parties via SocketIO
@@ -186,9 +190,10 @@ def create_session(current_user, current_device):
     data = request.get_json(silent=True) or {}
     recipient_id   = data.get('recipient_id')
     ephemeral_pub  = data.get('ephemeral_pub')  # JWK JSON string
+    ephemeral_sig  = data.get('ephemeral_sig')  # ECDSA P-384 signature (base64)
 
-    if not recipient_id or not ephemeral_pub:
-        return jsonify({'error': 'recipient_id and ephemeral_pub required'}), 400
+    if not recipient_id or not ephemeral_pub or not ephemeral_sig:
+        return jsonify({'error': 'recipient_id, ephemeral_pub and ephemeral_sig required'}), 400
 
     # Deactivate old sessions between these two users
     ChatSession.query.filter(
@@ -203,6 +208,7 @@ def create_session(current_user, current_device):
         user_a_id=current_user.id,
         user_b_id=recipient_id,
         ephemeral_pub_a=ephemeral_pub,
+        ephemeral_sig_a=ephemeral_sig,
     )
     db.session.add(session)
     db.session.commit()
@@ -213,6 +219,7 @@ def create_session(current_user, current_device):
         'initiator_id':     current_user.id,
         'initiator':        current_user.username,
         'ephemeral_pub_a':  ephemeral_pub,
+        'ephemeral_sig_a':  ephemeral_sig,   # Recipient must verify this signature
     })
 
     return jsonify({'session': session.to_dict()}), 201
@@ -226,15 +233,17 @@ def session_detail(current_user, current_device, session_id):
     if request.method == 'GET':
         return jsonify({'session': sess.to_dict()}), 200
 
-    # PUT — Bob submits his ephemeral pub key to complete handshake
+    # PUT — Bob submits his ephemeral pub key + signature to complete handshake
     data = request.get_json(silent=True) or {}
     sess.ephemeral_pub_b = data.get('ephemeral_pub')
+    sess.ephemeral_sig_b = data.get('ephemeral_sig')
     db.session.commit()
 
     # Notify Alice that the handshake is complete
     _emit_to_user(sess.user_a_id, 'session_ready', {
         'session_id':      sess.id,
         'ephemeral_pub_b': sess.ephemeral_pub_b,
+        'ephemeral_sig_b': sess.ephemeral_sig_b,  # Alice must verify this signature
     })
 
     return jsonify({'session': sess.to_dict()}), 200
@@ -524,6 +533,8 @@ def on_delete_message(data):
         msg.is_deep_deleted = True
         msg.deep_deleted_at = datetime.utcnow()
         msg.deep_deleted_by = user_id
+        # Immediately wipe payload — tombstone stays for UI display
+        msg.encrypted_payloads = '{}'
         db.session.commit()
         _emit_to_user(msg.sender_id,    'message_deleted', {'message_id': msg_id, 'type': 'deep'})
         _emit_to_user(msg.recipient_id, 'message_deleted', {'message_id': msg_id, 'type': 'deep'})

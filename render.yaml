@@ -1,0 +1,21 @@
+services:
+  - type: web
+    name: secureim
+    runtime: python
+    plan: free
+    buildCommand: pip install -r requirements.txt
+    startCommand: gunicorn --config gunicorn.conf.py run:app
+    healthCheckPath: /login
+    envVars:
+      - key: FLASK_ENV
+        value: production
+      - key: SOCKETIO_ASYNC_MODE
+        value: gevent
+      - key: SECRET_KEY
+        generateValue: true
+      - key: JWT_SECRET_KEY
+        generateValue: true
+      - key: MAIL_SUPPRESS_SEND
+        value: "true"
+      - key: KEY_ROTATION_THRESHOLD
+        value: "100"

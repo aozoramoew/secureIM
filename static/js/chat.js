@@ -86,38 +86,88 @@ async function initiateSession(recipientId) {
   const ephemeral = await SecureCrypto.generateEphemeralKeyPair();
   const ephPubJwk = await SecureCrypto.exportKeyJWK(ephemeral.publicKey);
 
+  // Sign the ephemeral public key with our long-term ECDSA identity key.
+  // This binds the ephemeral key to our identity — any relay that substitutes
+  // a different public key cannot produce a valid signature without our private key.
+  // This fully prevents MitM on the ECDH key exchange.
+  if (!myEcdsaPrivKey) { showAlert('❌ Identity key not loaded', 'error'); return null; }
+  const signature = await SecureCrypto.signData(myEcdsaPrivKey, ephPubJwk);
+
   const res = await apiPost(`${CHAT_API}/sessions`, {
     recipient_id:  recipientId,
     ephemeral_pub: ephPubJwk,
+    ephemeral_sig: signature,
   });
   const { session } = await res.json();
-
-  // Store ephemeral private key in memory keyed by session
   SecureStorage.storeSessionKeys(session.id, null, null, ephemeral.privateKey);
-
   return session;
 }
 
 async function onSessionRequest(data) {
-  const { session_id, initiator_id, ephemeral_pub_a } = data;
+  const { session_id, initiator_id, initiator, ephemeral_pub_a, ephemeral_sig_a } = data;
 
-  // Generate our ephemeral key pair
+  // ── Step 1: Verify initiator's ECDSA signature BEFORE key exchange ──
+  // Fetch their registered public key. A MitM substituting ephemeral_pub_a
+  // cannot forge ephemeral_sig_a without the initiator's ECDSA private key
+  // (which never leaves their device). This fully prevents MitM on ECDH.
+  const keysRes = await apiGet(`${CHAT_API}/users/${initiator}/keys`);
+  if (!keysRes.ok) { showAlert('❌ Could not fetch sender public key', 'error'); return; }
+  const { devices } = await keysRes.json();
+  if (!devices.length) { showAlert('❌ No device keys found for sender', 'error'); return; }
+
+  const isValid = await SecureCrypto.verifySignature(
+    devices[0].ecdsa_public_key, ephemeral_pub_a, ephemeral_sig_a
+  );
+  if (!isValid) {
+    showAlert('⛔ KEY EXCHANGE SIGNATURE INVALID — Possible MitM attack! Session aborted.', 'error');
+    console.error('[SecureIM] MitM detected: ephemeral key signature verification failed for', initiator);
+    return;  // ABORT — do not derive any keys
+  }
+
+  // ── Step 2: Generate our ephemeral key pair + sign it ──────────
   const ephemeral = await SecureCrypto.generateEphemeralKeyPair();
   const ephPubJwk = await SecureCrypto.exportKeyJWK(ephemeral.publicKey);
+  const signature = await SecureCrypto.signData(myEcdsaPrivKey, ephPubJwk);
 
-  // Derive session keys
+  // ── Step 3: Derive session keys from the VERIFIED ephemeral pub ─
   const aesKey  = await SecureCrypto.deriveSessionKey(ephemeral.privateKey, ephemeral_pub_a);
   const hmacKey = await SecureCrypto.deriveHMACKey(ephemeral.privateKey, ephemeral_pub_a);
   SecureStorage.storeSessionKeys(session_id, aesKey, hmacKey, ephemeral.privateKey);
 
-  // Send our public key back
-  await apiPut(`${CHAT_API}/sessions/${session_id}`, { ephemeral_pub: ephPubJwk });
+  // ── Step 4: Send our signed public key to complete handshake ────
+  await apiPut(`${CHAT_API}/sessions/${session_id}`, {
+    ephemeral_pub: ephPubJwk,
+    ephemeral_sig: signature,
+  });
 }
 
+
 async function onSessionReady(data) {
-  const { session_id, ephemeral_pub_b } = data;
+  const { session_id, ephemeral_pub_b, ephemeral_sig_b } = data;
   const stored = SecureStorage.getSessionKeys(session_id);
   if (!stored || !stored.myEphemeral) return;
+
+  // ── Verify Bob's ephemeral key signature BEFORE computing shared secret ──
+  // We need Bob's username to fetch his ECDSA public key.
+  // Use the active conversation's username.
+  if (activeConversation?.username && ephemeral_sig_b) {
+    const keysRes = await apiGet(`${CHAT_API}/users/${activeConversation.username}/keys`);
+    if (keysRes.ok) {
+      const { devices } = await keysRes.json();
+      if (devices.length) {
+        const isValid = await SecureCrypto.verifySignature(
+          devices[0].ecdsa_public_key, ephemeral_pub_b, ephemeral_sig_b
+        );
+        if (!isValid) {
+          showAlert('⛔ KEY EXCHANGE SIGNATURE INVALID — MitM attack detected! Aborting session.', 'error');
+          console.error('[SecureIM] MitM detected: session_ready signature verification failed');
+          SecureStorage.clearSessionKeys(session_id);
+          updateEncryptionBadge(false);
+          return;  // ABORT
+        }
+      }
+    }
+  }
 
   const aesKey  = await SecureCrypto.deriveSessionKey(stored.myEphemeral, ephemeral_pub_b);
   const hmacKey = await SecureCrypto.deriveHMACKey(stored.myEphemeral, ephemeral_pub_b);
@@ -298,38 +348,83 @@ async function openGroup(groupId, groupName) {
   history.forEach(m => renderMessage(m, m.sender_id === currentUser.id));
 }
 
-// ── Render ───────────────────────────────────────────────────────
+// ── CSP-safe DOM builder for messages ────────────────────────────
+// No inline onclick handlers — all listeners attached via addEventListener.
 
-function renderMessage(msg, isMine) {
-  const container = document.getElementById('messages-container');
+function buildMessageEl(msg, isMine) {
   const div = document.createElement('div');
-  div.id    = `msg-${msg.id}`;
+  div.id        = `msg-${msg.id}`;
   div.className = `message ${isMine ? 'mine' : 'theirs'}`;
 
   const time = new Date(msg.timestamp).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
 
   if (msg.is_deep_deleted) {
-    div.innerHTML = `<div class="msg-body deleted-msg">🗑️ This message was deleted.</div>`;
-  } else {
-    const body = msg.plaintext ?? '🔒 [Encrypted]';
-    div.innerHTML = `
-      <div class="msg-bubble">
-        <div class="msg-body">${escapeHtml(body)}</div>
-        <div class="msg-meta">
-          <span class="msg-time">${time}</span>
-          <span class="msg-enc-icon" title="End-to-end encrypted">🔒</span>
-        </div>
-        <div class="msg-actions">
-          <button class="msg-action-btn" onclick="showDeleteMenu(${msg.id})">⋯</button>
-          <div class="delete-menu" id="del-menu-${msg.id}" style="display:none">
-            <button onclick="deleteMessage(${msg.id},'local')">Delete for me</button>
-            ${isMine ? `<button onclick="deleteMessage(${msg.id},'deep')">Delete for everyone</button>` : ''}
-          </div>
-        </div>
-      </div>`;
+    const body = document.createElement('div');
+    body.className   = 'msg-body deleted-msg';
+    body.textContent = '🗑️ This message was deleted.';
+    div.appendChild(body);
+    return div;
   }
 
-  container.appendChild(div);
+  const bubble = document.createElement('div');
+  bubble.className = 'msg-bubble';
+
+  // Message body — textContent is safe against XSS
+  const body = document.createElement('div');
+  body.className   = 'msg-body';
+  body.textContent = msg.plaintext ?? '🔒 [Encrypted]';
+  bubble.appendChild(body);
+
+  // Meta row
+  const meta = document.createElement('div');
+  meta.className = 'msg-meta';
+  const timeEl = document.createElement('span');
+  timeEl.className   = 'msg-time';
+  timeEl.textContent = time;
+  const lockEl = document.createElement('span');
+  lockEl.className   = 'msg-enc-icon';
+  lockEl.title       = 'End-to-end encrypted';
+  lockEl.textContent = '🔒';
+  meta.append(timeEl, lockEl);
+  bubble.appendChild(meta);
+
+  // Actions
+  const actions = document.createElement('div');
+  actions.className = 'msg-actions';
+
+  const dotsBtn = document.createElement('button');
+  dotsBtn.className   = 'msg-action-btn';
+  dotsBtn.textContent = '⋯';
+  dotsBtn.addEventListener('click', () => {
+    const menu = div.querySelector('.delete-menu');
+    if (menu) menu.style.display = menu.style.display === 'none' ? 'block' : 'none';
+  });
+
+  const menu = document.createElement('div');
+  menu.className = 'delete-menu';
+  menu.style.display = 'none';
+
+  const delForMe = document.createElement('button');
+  delForMe.textContent = 'Delete for me';
+  delForMe.addEventListener('click', () => { menu.style.display='none'; deleteMessage(msg.id, 'local'); });
+  menu.appendChild(delForMe);
+
+  if (isMine) {
+    const delAll = document.createElement('button');
+    delAll.textContent = 'Delete for everyone';
+    delAll.addEventListener('click', () => { menu.style.display='none'; deleteMessage(msg.id, 'deep'); });
+    menu.appendChild(delAll);
+  }
+
+  actions.append(dotsBtn, menu);
+  bubble.appendChild(actions);
+  div.appendChild(bubble);
+  return div;
+}
+
+function renderMessage(msg, isMine) {
+  const container = document.getElementById('messages-container');
+  container.appendChild(buildMessageEl(msg, isMine));
   container.scrollTop = container.scrollHeight;
 }
 

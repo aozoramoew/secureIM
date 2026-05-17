@@ -116,6 +116,8 @@ class Message(db.Model):
     # Deep-delete: both sides see "This message was deleted"
     is_deep_deleted = db.Column(db.Boolean, default=False)
     deep_deleted_at = db.Column(db.DateTime, nullable=True)
+    # After this time the background scheduler wipes encrypted_payloads → '{}'
+    cleanup_at      = db.Column(db.DateTime, nullable=True, index=True)
     deep_deleted_by = db.Column(db.Integer, db.ForeignKey('users.id'), nullable=True)
 
     def get_deleted_for(self):
@@ -197,6 +199,10 @@ class ChatSession(db.Model):
     # Ephemeral ECDH public keys (JWK) submitted by each side
     ephemeral_pub_a = db.Column(db.Text, nullable=True)
     ephemeral_pub_b = db.Column(db.Text, nullable=True)
+    # ECDSA signatures over the ephemeral pub keys — used to detect MitM
+    # Signed with each party's long-term identity private key (ECDSA P-384)
+    ephemeral_sig_a = db.Column(db.Text, nullable=True)
+    ephemeral_sig_b = db.Column(db.Text, nullable=True)
     # How many messages have been sent in this key epoch
     message_count  = db.Column(db.Integer, default=0)
     created_at     = db.Column(db.DateTime, default=datetime.utcnow)
@@ -209,6 +215,8 @@ class ChatSession(db.Model):
             'user_b_id':       self.user_b_id,
             'ephemeral_pub_a': self.ephemeral_pub_a,
             'ephemeral_pub_b': self.ephemeral_pub_b,
+            'ephemeral_sig_a': self.ephemeral_sig_a,
+            'ephemeral_sig_b': self.ephemeral_sig_b,
             'message_count':   self.message_count,
             'created_at':      self.created_at.isoformat(),
         }

@@ -18,6 +18,7 @@ from flask import Blueprint, request, jsonify, current_app, redirect
 
 from app import db
 from app.models import User, DeviceKey, EmailVerification
+from app.limiter import limiter
 from app.crypto_utils import (
     hash_password, verify_password, needs_rehash,
     generate_jwt, decode_jwt, generate_secure_token,
@@ -64,6 +65,7 @@ def token_required(f):
 # ── Register ──────────────────────────────────────────────────────
 
 @auth_bp.route('/register', methods=['POST'])
+@limiter.limit('5 per hour')
 def register():
     data = request.get_json(silent=True) or {}
     username         = (data.get('username') or '').strip().lower()
@@ -140,6 +142,7 @@ def verify_email():
 # ── Login ─────────────────────────────────────────────────────────
 
 @auth_bp.route('/login', methods=['POST'])
+@limiter.limit('10 per minute')
 def login():
     data = request.get_json(silent=True) or {}
     username         = (data.get('username') or '').strip().lower()

@@ -113,14 +113,19 @@ def _send_via_resend(subject: str, recipient_email: str, html_body: str) -> bool
         with urllib.request.urlopen(req, timeout=10) as resp:
             result = json.loads(resp.read())
             email_id = result.get('id', 'unknown')
-            print(f'[EMAIL] Sent via Resend — id={email_id} to={recipient_email}')
+            print(f'[EMAIL OK] Resend id={email_id} to={recipient_email} from={from_addr}')
             return True
     except urllib.error.HTTPError as e:
         body = e.read().decode('utf-8', errors='replace')
-        print(f'[EMAIL ERROR] Resend HTTP {e.code}: {body}')
+        print(f'[EMAIL ERROR] Resend HTTP {e.code} from={from_addr} to={recipient_email}')
+        print(f'[EMAIL ERROR] Resend body: {body}')
+        if e.code == 403:
+            print('[EMAIL ERROR] 403 = domain chưa verify HOẶC gửi tới email ngoài whitelist (onboarding@resend.dev chỉ gửi tới email đăng ký Resend của bạn)')
+        if e.code == 422:
+            print('[EMAIL ERROR] 422 = RESEND_API_KEY sai hoặc hết hạn')
         return False
     except Exception as e:
-        print(f'[EMAIL ERROR] Resend failed: {e}')
+        print(f'[EMAIL ERROR] Resend exception: {type(e).__name__}: {e}')
         return False
 
 

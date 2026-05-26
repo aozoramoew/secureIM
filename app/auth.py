@@ -104,39 +104,37 @@ def register():
     if User.query.filter_by(email=email).first():
         return jsonify({'error': 'Email already registered'}), 409
 
-    # Create user
+    # Create user — auto-verified (email verification disabled)
     user = User(
         username=username,
         email=email,
         password_hash=hash_password(password),
+        is_email_verified=True,   # <-- auto verify, no email needed
     )
     db.session.add(user)
     db.session.flush()  # get user.id
 
-    # Register first device
+    # Register first device (active immediately)
     device = DeviceKey(
         user_id=user.id,
         device_id=device_id,
         ecdsa_public_key=ecdsa_public_key,
         ecdh_public_key=ecdh_public_key,
         device_name=device_name,
+        is_active=True,
     )
     db.session.add(device)
-
-    # Email verification token
-    exp = datetime.utcnow() + current_app.config['EMAIL_VERIFY_TOKEN_EXPIRY']
-    ev = EmailVerification(
-        user_id=user.id,
-        token=generate_secure_token(),
-        verification_type='email_verify',
-        expires_at=exp,
-    )
-    db.session.add(ev)
     db.session.commit()
 
-    send_verification_email(user, ev.token)
-    _audit('register', user_id=user.id, detail={'username': username})
-    return jsonify({'message': 'Registration successful. Check your email to verify your account.'}), 201
+    # Issue JWT immediately — user can login right away
+    token = generate_jwt(user.id, device_id)
+    _audit('register', user_id=user.id, detail={'username': username, 'auto_verified': True})
+    return jsonify({
+        'message': 'Registration successful.',
+        'status': 'ok',
+        'token': token,
+        'user': user.to_dict(),
+    }), 201
 
 
 # ── Resend Verification Email ─────────────────────────────────────
@@ -217,8 +215,7 @@ def login():
         _audit('login_fail', detail={'username': username})
         return jsonify({'error': 'Invalid username or password'}), 401
 
-    if not user.is_email_verified:
-        return jsonify({'error': 'Please verify your email before logging in'}), 403
+    # (email verification disabled — all accounts are auto-verified on register)
 
     # Rehash if needed
     if needs_rehash(user.password_hash):

@@ -753,3 +753,66 @@ html, body {
 }
 
 .verify-icon { font-size: 56px; margin-bottom: 16px; }
+
+/* ── Read Receipts ──────────────────────────────────────────── */
+.msg-receipt {
+  font-size: 12px;
+  color: var(--text-muted);
+  margin-left: 2px;
+  transition: color 0.3s;
+}
+
+/* ── Self-Destruct Timer ────────────────────────────────────── */
+.msg-timer {
+  font-size: 11px;
+  color: var(--warning);
+  margin-top: 4px;
+  font-family: var(--font-mono);
+  display: flex;
+  align-items: center;
+  gap: 4px;
+}
+
+/* ── Timer Select in Input Bar ──────────────────────────────── */
+#timer-select {
+  background: var(--bg-raised);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  color: var(--text-muted);
+  font-size: 12px;
+  padding: 6px 8px;
+  outline: none;
+  cursor: pointer;
+  flex-shrink: 0;
+  transition: border-color 0.2s, color 0.2s;
+}
+#timer-select:focus { border-color: var(--warning); color: var(--warning); }
+#timer-select option { background: var(--bg-surface); }
+
+/* ── Light Theme ────────────────────────────────────────────── */
+[data-theme="light"] {
+  --bg-base:    #f0f4f8;
+  --bg-surface: #ffffff;
+  --bg-raised:  #e8edf2;
+  --bg-hover:   #dde3ea;
+  --text:       #1a202c;
+  --text-muted: #718096;
+  --border:     rgba(0,0,0,0.1);
+  --shadow:     0 4px 24px rgba(0,0,0,0.12);
+  --glow-cyan:  0 0 20px rgba(0,150,200,0.15);
+}
+
+[data-theme="light"] .message.mine .msg-bubble {
+  background: linear-gradient(135deg, #bee3f8, #90cdf4);
+}
+
+[data-theme="light"] .sidebar,
+[data-theme="light"] .chat-header,
+[data-theme="light"] .input-area {
+  background: var(--bg-surface);
+}
+
+/* Smooth theme transitions */
+html { transition: background 0.3s, color 0.3s; }
+*, *::before, *::after { transition: background-color 0.2s, border-color 0.2s; }
+

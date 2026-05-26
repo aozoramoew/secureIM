@@ -45,8 +45,13 @@
 
     <div id="reg-status" class="status-msg"></div>
 
-    <div class="auth-footer">
-      Already have an account? <a href="/login">Sign in</a>
+    <div class="auth-footer" style="display:flex; align-items:center; justify-content:space-between; flex-wrap:wrap; gap:8px;">
+      <span>Already have an account? <a href="/login">Sign in</a></span>
+      <button id="dev-links-btn" title="View suppressed dev emails" style="
+        background: transparent; border: 1px dashed #334155; color: #475569;
+        padding: 4px 10px; border-radius: 6px; cursor: pointer; font-size: 11px;
+        display: flex; align-items: center; gap: 5px;
+      ">🛠️ Dev Emails</button>
     </div>
   </div>
 </main>

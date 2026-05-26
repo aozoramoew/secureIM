@@ -47,8 +47,12 @@
   <aside class="sidebar">
     <div class="sidebar-header">
       <span class="sidebar-logo">🔒 SecureIM</span>
-      <button id="logout-btn" class="btn btn-ghost"
-              style="padding:6px 12px;font-size:12px;width:auto;">Logout</button>
+      <div style="display:flex;gap:6px;">
+        <button id="theme-btn" class="btn btn-ghost"
+                style="padding:6px 10px;font-size:14px;width:auto;" title="Toggle theme">🌙</button>
+        <button id="logout-btn" class="btn btn-ghost"
+                style="padding:6px 12px;font-size:12px;width:auto;">Logout</button>
+      </div>
     </div>
 
     <div class="user-info">
@@ -127,6 +131,13 @@
       <div id="messages-container" class="messages-container"></div>
 
       <div class="input-area">
+        <select id="timer-select" title="Self-destruct timer">
+          <option value="0">⏱️ Off</option>
+          <option value="300">5 min</option>
+          <option value="3600">1 hr</option>
+          <option value="86400">24 hr</option>
+          <option value="604800">7 days</option>
+        </select>
         <textarea id="message-input" placeholder="Type a message… (Enter to send)"
                   rows="1" autocomplete="off"></textarea>
         <button id="send-btn" title="Send message">➤</button>

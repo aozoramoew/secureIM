@@ -120,6 +120,13 @@ class Message(db.Model):
     cleanup_at      = db.Column(db.DateTime, nullable=True, index=True)
     deep_deleted_by = db.Column(db.Integer, db.ForeignKey('users.id'), nullable=True)
 
+    # Self-destruct timer (A1) — null means no expiry
+    expires_at      = db.Column(db.DateTime, nullable=True, index=True)
+
+    # Read receipts (A2)
+    delivered_at    = db.Column(db.DateTime, nullable=True)   # server received + relayed
+    read_at         = db.Column(db.DateTime, nullable=True)   # recipient opened conversation
+
     def get_deleted_for(self):
         return json.loads(self.deleted_for or '[]')
 
@@ -140,6 +147,9 @@ class Message(db.Model):
             'timestamp':        self.timestamp.isoformat(),
             'is_deep_deleted':  self.is_deep_deleted,
             'deleted_for_me':   (requesting_user_id in deleted_for_list) if requesting_user_id else False,
+            'expires_at':       self.expires_at.isoformat() if self.expires_at else None,
+            'delivered_at':     self.delivered_at.isoformat() if self.delivered_at else None,
+            'read_at':          self.read_at.isoformat() if self.read_at else None,
         }
 
 
@@ -237,3 +247,35 @@ class ContactVerification(db.Model):
     key_fingerprint = db.Column(db.String(128), nullable=False)
 
     __table_args__ = (db.UniqueConstraint('user_id', 'contact_id'),)
+
+
+# ─────────────────────────────────────────────
+#  Audit Log (A5) — security events only, never message content
+# ─────────────────────────────────────────────
+
+class AuditLog(db.Model):
+    """
+    Security event log. Records WHAT happened and WHO, never message content.
+    Event types: login_ok, login_fail, register, email_verified,
+                 device_add, device_revoke, key_rotation,
+                 deep_delete, contact_verify
+    """
+    __tablename__ = 'audit_logs'
+
+    id         = db.Column(db.Integer, primary_key=True)
+    timestamp  = db.Column(db.DateTime, default=datetime.utcnow, index=True)
+    user_id    = db.Column(db.Integer, db.ForeignKey('users.id'), nullable=True)
+    event_type = db.Column(db.String(40), nullable=False, index=True)
+    ip_address = db.Column(db.String(45), nullable=True)    # IPv4 or IPv6
+    user_agent = db.Column(db.String(256), nullable=True)
+    detail     = db.Column(db.Text, default='{}')           # JSON metadata, never plaintext
+
+    def to_dict(self):
+        return {
+            'id':         self.id,
+            'timestamp':  self.timestamp.isoformat(),
+            'user_id':    self.user_id,
+            'event_type': self.event_type,
+            'ip_address': self.ip_address,
+            'detail':     json.loads(self.detail or '{}'),
+        }

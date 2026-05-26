@@ -18,7 +18,14 @@ const SecureCrypto = (() => {
   // ── Utility ────────────────────────────────────────────────────
 
   function bufToB64(buf) {
-    return btoa(String.fromCharCode(...new Uint8Array(buf)));
+    // Chunked to avoid stack overflow on large buffers (cross-browser safe)
+    const bytes = new Uint8Array(buf);
+    let binary = '';
+    const chunkSize = 8192;
+    for (let i = 0; i < bytes.length; i += chunkSize) {
+      binary += String.fromCharCode(...bytes.subarray(i, i + chunkSize));
+    }
+    return btoa(binary);
   }
 
   function b64ToBuf(b64) {

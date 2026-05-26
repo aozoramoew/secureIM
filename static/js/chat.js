@@ -71,6 +71,7 @@ function connectSocket(token) {
 
   socket.on('receive_message', onReceiveMessage);
   socket.on('message_deleted', onMessageDeleted);
+  socket.on('message_read',    onMessageRead);
   socket.on('group_created',   onGroupCreated);
 
   socket.on('typing', d => {
@@ -223,17 +224,24 @@ async function sendMessage() {
       deviceMap['group'] = payload;
     }
 
+    // Self-destruct: read expires_seconds from the selector in the input bar
+    const timerSel = document.getElementById('timer-select');
+    const expiresSec = timerSel ? parseInt(timerSel.value) || 0 : 0;
+
     socket.emit('send_message', {
       session_id:          activeConversation.sessionId,
       group_id:            activeConversation.type === 'group' ? activeConversation.id : undefined,
       encrypted_payloads:  deviceMap,
       msg_type:            activeConversation.type,
+      expires_seconds:     expiresSec || undefined,
     });
 
     // Optimistically render outgoing message
+    const expiresAt = expiresSec ? new Date(Date.now() + expiresSec * 1000).toISOString() : null;
     const optimistic = {
       id: Date.now(), sender_id: currentUser.id, plaintext: text,
       timestamp: new Date().toISOString(), is_deep_deleted: false,
+      expires_at: expiresAt,
     };
     renderMessage(optimistic, true);
 
@@ -300,16 +308,29 @@ function onMessageDeleted(data) {
   const { message_id, type } = data;
   const el = document.getElementById(`msg-${message_id}`);
   if (!el) return;
-  if (type === 'deep') {
-    el.querySelector('.msg-body').textContent = '🗑️ This message was deleted.';
-    el.querySelector('.msg-body').classList.add('deleted-msg');
+  if (type === 'deep' || type === 'expired') {
+    const body = el.querySelector('.msg-body');
+    if (body) {
+      body.textContent = type === 'expired' ? '⏱️ Message expired.' : '🗑️ This message was deleted.';
+      body.classList.add('deleted-msg');
+    }
     el.querySelector('.msg-actions')?.remove();
+    el.querySelector('.msg-timer')?.remove();
     if (currentPassword) {
       const convId = getActiveConvId();
       SecureStorage.markDeepDeleted(currentPassword, convId, message_id);
     }
   }
 }
+
+function onMessageRead(data) {
+  const { message_id } = data;
+  const el = document.getElementById(`msg-${message_id}`);
+  if (!el) return;
+  const receipt = el.querySelector('.msg-receipt');
+  if (receipt) { receipt.textContent = '✓✓'; receipt.style.color = '#00d4ff'; }
+}
+
 
 // ── Open DM Conversation ─────────────────────────────────────────
 
@@ -325,12 +346,18 @@ async function openDM(userId, username) {
 
   // Start ECDH session
   const sess = await initiateSession(userId);
+  if (!sess) return;
   activeConversation.sessionId = sess.id;
 
   // Load stored history
   const convId = `dm_${Math.min(currentUser.id, userId)}_${Math.max(currentUser.id, userId)}`;
   const history = await SecureStorage.getConversation(currentPassword, convId);
   history.forEach(m => renderMessage(m, m.sender_id === currentUser.id));
+
+  // Mark all unread messages from this contact as read
+  history.filter(m => m.sender_id === userId && !m.read_at).forEach(m => {
+    apiPost(`${CHAT_API}/messages/${m.id}/read`, {}).catch(() => {});
+  });
 }
 
 async function openGroup(groupId, groupName) {
@@ -369,7 +396,7 @@ function buildMessageEl(msg, isMine) {
   const bubble = document.createElement('div');
   bubble.className = 'msg-bubble';
 
-  // Message body — textContent is safe against XSS
+  // Message body — textContent is XSS-safe
   const body = document.createElement('div');
   body.className   = 'msg-body';
   body.textContent = msg.plaintext ?? '🔒 [Encrypted]';
@@ -385,8 +412,39 @@ function buildMessageEl(msg, isMine) {
   lockEl.className   = 'msg-enc-icon';
   lockEl.title       = 'End-to-end encrypted';
   lockEl.textContent = '🔒';
-  meta.append(timeEl, lockEl);
+
+  // Read receipt (only on outgoing messages)
+  if (isMine) {
+    const receipt = document.createElement('span');
+    receipt.className   = 'msg-receipt';
+    receipt.title       = msg.delivered_at ? 'Delivered' : 'Sent';
+    receipt.textContent = msg.read_at ? '✓✓' : '✓';
+    if (msg.read_at) receipt.style.color = '#00d4ff';
+    meta.append(timeEl, lockEl, receipt);
+  } else {
+    meta.append(timeEl, lockEl);
+  }
   bubble.appendChild(meta);
+
+  // Self-destruct countdown
+  if (msg.expires_at) {
+    const timerEl = document.createElement('div');
+    timerEl.className = 'msg-timer';
+    const expiresMs = new Date(msg.expires_at).getTime();
+    const updateTimer = () => {
+      const remaining = Math.max(0, Math.floor((expiresMs - Date.now()) / 1000));
+      if (remaining === 0) { timerEl.textContent = '⏱️ Expired'; return; }
+      const m = Math.floor(remaining / 60), s = remaining % 60;
+      timerEl.textContent = `⏱️ ${m}m ${s}s`;
+    };
+    updateTimer();
+    const interval = setInterval(() => {
+      const remaining = Math.max(0, Math.floor((expiresMs - Date.now()) / 1000));
+      updateTimer();
+      if (remaining === 0) clearInterval(interval);
+    }, 1000);
+    bubble.appendChild(timerEl);
+  }
 
   // Actions
   const actions = document.createElement('div');
@@ -684,4 +742,18 @@ document.addEventListener('DOMContentLoaded', () => {
   if (sessionToggle) sessionToggle.addEventListener('change', e => updateSetting('session_mode', e.target.checked));
 
   document.getElementById('create-group-btn')?.addEventListener('click', createGroup);
+
+  // ── Theme toggle (C5) ────────────────────────────────────────
+  const themeBtn = document.getElementById('theme-btn');
+  const applyTheme = (theme) => {
+    document.documentElement.setAttribute('data-theme', theme);
+    if (themeBtn) themeBtn.textContent = theme === 'light' ? '🌙' : '☀️';
+    localStorage.setItem('theme', theme);
+  };
+  // Restore saved theme
+  applyTheme(localStorage.getItem('theme') || 'dark');
+  themeBtn?.addEventListener('click', () => {
+    const current = document.documentElement.getAttribute('data-theme') || 'dark';
+    applyTheme(current === 'dark' ? 'light' : 'dark');
+  });
 });

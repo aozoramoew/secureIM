@@ -60,14 +60,24 @@ _2FA_EMAIL_BODY = """\
 """
 
 
+# In-dev buffer: last 10 links (never used in production)
+_dev_link_buffer: list[dict] = []
+
+
 def _send(subject: str, recipient_email: str, html_body: str, link: str):
     """Internal send helper — logs to console when MAIL_SUPPRESS_SEND=true."""
     if current_app.config.get('MAIL_SUPPRESS_SEND', True):
-        print("\n" + "=" * 70)
-        print(f"[DEV EMAIL] To: {recipient_email}")
-        print(f"[DEV EMAIL] Subject: {subject}")
-        print(f"[DEV EMAIL] Link: {link}")
-        print("=" * 70 + "\n")
+        entry = {'to': recipient_email, 'subject': subject, 'link': link}
+        _dev_link_buffer.append(entry)
+        if len(_dev_link_buffer) > 10:
+            _dev_link_buffer.pop(0)
+        # Print loudly so it's visible in the terminal
+        print('\n' + '\u2550' * 70)
+        print(f'[DEV EMAIL] To     : {recipient_email}')
+        print(f'[DEV EMAIL] Subject: {subject}')
+        print(f'[DEV EMAIL] ⭐ Link  : {link}')
+        print(f'[DEV EMAIL] Also at: http://localhost:5000/api/auth/dev-links')
+        print('\u2550' * 70 + '\n')
         return
 
     msg = Message(subject=subject, recipients=[recipient_email], html=html_body)

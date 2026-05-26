@@ -1,20 +1,13 @@
 """
 Background scheduler — runs cleanup jobs independent of web requests.
 
-Job: cleanup_deleted_payloads
-  Runs every hour. Finds Messages where:
-    - is_deep_deleted = True
-    - cleanup_at <= now  (24h grace period has elapsed)
-    - encrypted_payloads != '{}'  (payload not yet wiped)
-  Sets encrypted_payloads = '{}' to physically remove the ciphertext.
-  The tombstone row (is_deep_deleted=True) is kept forever so the UI
-  always shows "This message was deleted" correctly.
+Jobs:
+  1. cleanup_expired_messages  — runs every 5 minutes.
+     Finds Messages where expires_at <= now (self-destruct timer fired).
+     Immediately wipes encrypted_payloads and sets is_deep_deleted=True.
+     Emits 'message_deleted' SocketIO event so live clients react instantly.
 
-Why 24h grace?
-  Offline recipients need time to receive the deep-delete tombstone event.
-  For 24h they can reconnect and see is_deep_deleted=True in history.
-  After 24h the ciphertext is wiped. The payload was already cryptographically
-  useless (server can't decrypt it), but this eliminates any residual storage.
+  2. (Optional) Any future periodic cleanup jobs go here.
 """
 import logging
 from datetime import datetime
@@ -26,23 +19,36 @@ log = logging.getLogger(__name__)
 _scheduler = BackgroundScheduler(timezone='UTC')
 
 
-def _cleanup_deleted_payloads(app):
+def _cleanup_expired_messages(app):
+    """Wipe self-destructed messages whose expires_at has passed."""
     with app.app_context():
         from app import db
         from app.models import Message
 
         now = datetime.utcnow()
-        msgs = Message.query.filter(
-            Message.is_deep_deleted == True,       # noqa: E712
-            Message.cleanup_at  <= now,
-            Message.encrypted_payloads != '{}',
+        expired = Message.query.filter(
+            Message.expires_at <= now,
+            Message.is_deep_deleted == False,   # noqa: E712
         ).all()
 
-        if msgs:
-            for m in msgs:
+        if expired:
+            from app import socketio as _io
+            from app.chat import _connected_sids  # read-only
+
+            for m in expired:
+                m.is_deep_deleted   = True
+                m.deep_deleted_at   = now
                 m.encrypted_payloads = '{}'
+                # Notify live clients
+                for sid, info in list(_connected_sids.items()):
+                    if info['user_id'] in (m.sender_id, m.recipient_id):
+                        _io.emit('message_deleted', {
+                            'message_id': m.id,
+                            'type': 'expired',
+                        }, room=sid)
+
             db.session.commit()
-            log.info('[Scheduler] Wiped payloads from %d deep-deleted messages', len(msgs))
+            log.info('[Scheduler] Self-destructed %d expired messages', len(expired))
 
 
 def start_scheduler(app):
@@ -51,11 +57,11 @@ def start_scheduler(app):
         return
 
     _scheduler.add_job(
-        func=_cleanup_deleted_payloads,
-        trigger=IntervalTrigger(hours=1),
+        func=_cleanup_expired_messages,
+        trigger=IntervalTrigger(minutes=5),
         args=[app],
-        id='cleanup_payloads',
+        id='cleanup_expired',
         replace_existing=True,
     )
     _scheduler.start()
-    log.info('[Scheduler] Started — payload cleanup runs every hour')
+    log.info('[Scheduler] Started — self-destruct check runs every 5 minutes')

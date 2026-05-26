@@ -17,7 +17,7 @@ from functools import wraps
 from flask import Blueprint, request, jsonify, current_app, redirect
 
 from app import db
-from app.models import User, DeviceKey, EmailVerification
+from app.models import User, DeviceKey, EmailVerification, AuditLog
 from app.limiter import limiter
 from app.crypto_utils import (
     hash_password, verify_password, needs_rehash,
@@ -26,6 +26,22 @@ from app.crypto_utils import (
 from app.email_utils import send_verification_email, send_2fa_email
 
 auth_bp = Blueprint('auth', __name__)
+
+
+def _audit(event_type: str, user_id=None, detail: dict | None = None):
+    """Record a security event. Never logs message content."""
+    try:
+        entry = AuditLog(
+            event_type=event_type,
+            user_id=user_id,
+            ip_address=request.remote_addr,
+            user_agent=request.headers.get('User-Agent', '')[:256],
+            detail=__import__('json').dumps(detail or {}),
+        )
+        db.session.add(entry)
+        db.session.commit()
+    except Exception:
+        pass  # Audit must never break the main flow
 
 
 # ── Auth decorator ─────────────────────────────────────────────────
@@ -119,8 +135,49 @@ def register():
     db.session.commit()
 
     send_verification_email(user, ev.token)
-
+    _audit('register', user_id=user.id, detail={'username': username})
     return jsonify({'message': 'Registration successful. Check your email to verify your account.'}), 201
+
+
+# ── Resend Verification Email ─────────────────────────────────────
+
+@auth_bp.route('/resend-verification', methods=['POST'])
+@limiter.limit('3 per hour')
+def resend_verification():
+    data  = request.get_json(silent=True) or {}
+    email = (data.get('email') or '').strip().lower()
+    if not email:
+        return jsonify({'error': 'Email is required'}), 400
+
+    user = User.query.filter_by(email=email).first()
+    # Always return success to avoid email enumeration
+    if not user:
+        return jsonify({'message': 'If that email is registered, a new verification link has been sent.'}), 200
+
+    if user.is_email_verified:
+        return jsonify({'error': 'This account is already verified. Please sign in.'}), 400
+
+    # Invalidate any existing unused tokens
+    old_evs = EmailVerification.query.filter_by(
+        user_id=user.id, verification_type='email_verify', is_used=False
+    ).all()
+    for old in old_evs:
+        old.is_used = True
+
+    # Create fresh token
+    exp = datetime.utcnow() + current_app.config['EMAIL_VERIFY_TOKEN_EXPIRY']
+    ev = EmailVerification(
+        user_id=user.id,
+        token=generate_secure_token(),
+        verification_type='email_verify',
+        expires_at=exp,
+    )
+    db.session.add(ev)
+    db.session.commit()
+
+    send_verification_email(user, ev.token)
+    _audit('resend_verification', user_id=user.id)
+    return jsonify({'message': 'A new verification email has been sent. Please check your inbox.'}), 200
 
 
 # ── Email verification (link click) ───────────────────────────────
@@ -135,7 +192,7 @@ def verify_email():
     ev.is_used = True
     ev.user.is_email_verified = True
     db.session.commit()
-
+    _audit('email_verified', user_id=ev.user_id)
     return redirect('/login?verified=1')
 
 
@@ -157,6 +214,7 @@ def login():
 
     user = User.query.filter_by(username=username).first()
     if not user or not verify_password(password, user.password_hash):
+        _audit('login_fail', detail={'username': username})
         return jsonify({'error': 'Invalid username or password'}), 401
 
     if not user.is_email_verified:
@@ -181,6 +239,7 @@ def login():
         db.session.commit()
 
         token = generate_jwt(user.id, device_id)
+        _audit('login_ok', user_id=user.id, detail={'device_id': device_id})
         return jsonify({'status': 'ok', 'token': token, 'user': user.to_dict()}), 200
 
     else:
@@ -243,8 +302,7 @@ def two_factor_verify():
     device.last_seen = datetime.utcnow()
     ev.is_used = True
     db.session.commit()
-
-    # Render a page that tells the user they can close this tab
+    _audit('device_add', user_id=ev.user_id, detail={'device_id': ev.device_id})
     return redirect(f'/device-authorized?device={device.device_name}')
 
 
@@ -312,3 +370,18 @@ def logout(current_user, current_device):
     current_device.is_active = False
     db.session.commit()
     return jsonify({'message': 'Logged out successfully'}), 200
+
+
+# ── Dev-only: view suppressed email links ────────────────────────
+# Only active when MAIL_SUPPRESS_SEND=true. Returns last 10 links
+# so you don't have to hunt through the terminal.
+
+@auth_bp.route('/dev-links', methods=['GET'])
+def dev_links():
+    if not current_app.config.get('MAIL_SUPPRESS_SEND', True):
+        return jsonify({'error': 'Not available in production'}), 403
+    from app.email_utils import _dev_link_buffer
+    return jsonify({
+        'note': 'These are suppressed emails (dev mode). Copy the link and open it in your browser.',
+        'links': list(reversed(_dev_link_buffer)),  # newest first
+    }), 200

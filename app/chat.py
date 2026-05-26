@@ -33,7 +33,7 @@ from flask_socketio import emit, join_room, leave_room
 from app import db, socketio
 from app.models import (
     User, DeviceKey, Message, Group, GroupMember,
-    ChatSession, ContactVerification,
+    ChatSession, ContactVerification, AuditLog,
 )
 from app.crypto_utils import decode_jwt
 
@@ -41,6 +41,23 @@ chat_bp = Blueprint('chat', __name__)
 
 # sid → {user_id, device_id}
 _connected_sids: dict[str, dict] = {}
+
+
+def _audit(event_type: str, user_id=None, detail: dict | None = None):
+    """Record a security-relevant chat event."""
+    import json
+    try:
+        from flask import request as _req
+        entry = AuditLog(
+            event_type=event_type, user_id=user_id,
+            ip_address=_req.remote_addr,
+            user_agent=_req.headers.get('User-Agent', '')[:256],
+            detail=json.dumps(detail or {}),
+        )
+        db.session.add(entry)
+        db.session.commit()
+    except Exception:
+        pass
 
 
 # ── JWT helper for REST ────────────────────────────────────────────
@@ -164,13 +181,11 @@ def delete_message(current_user, current_device, msg_id):
         msg.is_deep_deleted = True
         msg.deep_deleted_at = datetime.utcnow()
         msg.deep_deleted_by = current_user.id
-        # Immediately wipe the ciphertext — server holds zero plaintext or payload.
-        # The tombstone row (is_deep_deleted=True) remains so both clients
-        # permanently display "🗑️ This message was deleted."
         msg.encrypted_payloads = '{}'
         db.session.commit()
-
-        # Notify all parties via SocketIO
+        _audit('deep_delete', user_id=current_user.id,
+               detail={'message_id': msg_id, 'recipient_id': msg.recipient_id})
+        # Notify all parties
         _emit_to_user(msg.sender_id,    'message_deleted', {'message_id': msg_id, 'type': 'deep'})
         _emit_to_user(msg.recipient_id, 'message_deleted', {'message_id': msg_id, 'type': 'deep'})
     else:
@@ -371,6 +386,36 @@ def verified_contacts(current_user, current_device):
     }), 200
 
 
+# ── Read Receipts ────────────────────────────────────────────────
+
+@chat_bp.route('/messages/<int:msg_id>/read', methods=['POST'])
+@jwt_required
+def mark_message_read(current_user, current_device, msg_id):
+    """Mark a message as read. Emits 'message_read' to sender."""
+    msg = Message.query.get_or_404(msg_id)
+    if msg.recipient_id != current_user.id:
+        return jsonify({'error': 'Forbidden'}), 403
+    if not msg.read_at:
+        msg.read_at = datetime.utcnow()
+        db.session.commit()
+        _emit_to_user(msg.sender_id, 'message_read', {
+            'message_id': msg_id,
+            'read_at': msg.read_at.isoformat(),
+        })
+    return jsonify({'read_at': msg.read_at.isoformat()}), 200
+
+
+# ── Audit Log API ─────────────────────────────────────────────────
+
+@chat_bp.route('/audit', methods=['GET'])
+@jwt_required
+def get_audit_log(current_user, current_device):
+    """Return this user's own audit log (last 100 events)."""
+    logs = AuditLog.query.filter_by(user_id=current_user.id)\
+        .order_by(AuditLog.timestamp.desc()).limit(100).all()
+    return jsonify({'audit': [l.to_dict() for l in logs]}), 200
+
+
 # ══════════════════════════════════════════════
 #  SOCKET.IO EVENTS
 # ══════════════════════════════════════════════
@@ -477,10 +522,18 @@ def on_send_message(data):
 
         recipient_id = sess.user_b_id if sess.user_a_id == sender.id else sess.user_a_id
 
+        # Self-destruct: expires_seconds=0 means no expiry
+        expires_seconds = data.get('expires_seconds')  # e.g. 300, 3600, 86400
+        expires_at = None
+        if expires_seconds:
+            expires_at = datetime.utcnow() + timedelta(seconds=int(expires_seconds))
+
         msg = Message(
             sender_id=sender.id,
             recipient_id=recipient_id,
             encrypted_payloads=payloads_json,
+            delivered_at=datetime.utcnow(),
+            expires_at=expires_at,
         )
         db.session.add(msg)
 

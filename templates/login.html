@@ -40,8 +40,32 @@
 
     <div id="login-status" class="status-msg"></div>
 
-    <div class="auth-footer">
-      Don't have an account? <a href="/register">Create one</a>
+    <!-- Resend Verification Section (shown when email not verified) -->
+    <div id="resend-verification" style="display:none; flex-direction:column; gap:12px; margin-top:16px;
+         background:rgba(251,191,36,0.08); border:1px solid rgba(251,191,36,0.3); border-radius:12px; padding:20px;">
+      <h3 style="margin:0; font-size:15px; color:#fbbf24;">📬 Haven't received your verification email?</h3>
+      <p style="margin:0; font-size:13px; color:var(--text-muted);">
+        Enter your email address to receive a new verification link.
+      </p>
+      <form id="resend-verification-form" novalidate style="display:flex; flex-direction:column; gap:10px;">
+        <input id="resend-email" class="form-control" type="email"
+               placeholder="your@email.com" autocomplete="email" required
+               style="margin-bottom:0;">
+        <button id="resend-btn" type="submit" class="btn btn-primary"
+                style="background:linear-gradient(135deg,#d97706,#b45309); width:auto; padding:10px 20px;">
+          Resend Verification Email
+        </button>
+      </form>
+      <div id="resend-status" class="status-msg" style="margin:0;"></div>
+    </div>
+
+    <div class="auth-footer" style="display:flex; align-items:center; justify-content:space-between; flex-wrap:wrap; gap:8px;">
+      <span>Don't have an account? <a href="/register">Create one</a></span>
+      <button id="dev-links-btn" title="View suppressed dev emails" style="
+        background: transparent; border: 1px dashed #334155; color: #475569;
+        padding: 4px 10px; border-radius: 6px; cursor: pointer; font-size: 11px;
+        display: flex; align-items: center; gap: 5px;
+      ">🛠️ Dev Emails</button>
     </div>
   </div>
 </main>

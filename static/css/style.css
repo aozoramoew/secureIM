@@ -816,3 +816,162 @@ html, body {
 html { transition: background 0.3s, color 0.3s; }
 *, *::before, *::after { transition: background-color 0.2s, border-color 0.2s; }
 
+/* ── Critical Layout Fixes ──────────────────────────────────── */
+
+/* Ensure chat app fills viewport properly */
+body { overflow: hidden; }
+
+.chat-app {
+  display: flex;
+  height: 100vh;
+  width: 100vw;
+  overflow: hidden;
+}
+
+/* Sidebar must be a flex column so content scrolls properly */
+.sidebar {
+  display: flex;
+  flex-direction: column;
+  flex-shrink: 0;
+  height: 100vh;
+  overflow: hidden;
+}
+
+/* contacts-list must grow to fill available sidebar space */
+.contacts-list {
+  flex: 1;
+  overflow-y: auto;
+  min-height: 0; /* critical for flex children */
+}
+
+/* settings panel stays at bottom of sidebar */
+.settings-panel {
+  flex-shrink: 0;
+  margin-top: auto;
+}
+
+/* Right panel: flex column, fills remaining width */
+.chat-app > div[style*="flex:1"] {
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  height: 100vh;
+  overflow: hidden;
+}
+
+/* chat-main must be a flex column and fill all height */
+.chat-main {
+  display: flex;
+  flex-direction: column;
+  flex: 1;
+  min-height: 0;
+  overflow: hidden;
+}
+
+/* messages-container must grow and scroll */
+.messages-container {
+  flex: 1;
+  min-height: 0; /* critical — without this, flex children don't scroll */
+  overflow-y: auto;
+  padding: 20px;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+/* no-chat-placeholder fills the right panel */
+.no-chat-placeholder {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  flex-direction: column;
+  gap: 14px;
+  color: var(--text-muted);
+}
+
+/* input-area never shrinks */
+.input-area {
+  flex-shrink: 0;
+}
+
+/* chat-header never shrinks */
+.chat-header {
+  flex-shrink: 0;
+}
+
+/* Sidebar groups section should not grow, only contacts DM list grows */
+#groups-list {
+  max-height: 160px;
+  overflow-y: auto;
+  flex: none;
+}
+
+/* Better scrollbar for messages */
+.messages-container::-webkit-scrollbar { width: 4px; }
+.messages-container::-webkit-scrollbar-thumb {
+  background: var(--bg-raised);
+  border-radius: 2px;
+}
+
+/* Sidebar overflow fixed for all sub-sections */
+.sidebar-search,
+.sidebar-header,
+.user-info,
+.sidebar-section {
+  flex-shrink: 0;
+}
+
+/* Avatar letter in sidebar header */
+#user-avatar-letter {
+  font-size: 15px;
+  font-weight: 700;
+  color: #0a0e1a;
+}
+
+/* Unread badge */
+.unread-badge {
+  display: none;
+  background: var(--accent);
+  color: #0a0e1a;
+  font-size: 10px;
+  font-weight: 700;
+  border-radius: 10px;
+  padding: 1px 6px;
+  min-width: 18px;
+  text-align: center;
+  flex-shrink: 0;
+}
+
+/* Fix enc-badge layout in header */
+.chat-header {
+  display: flex;
+  align-items: center;
+  gap: 14px;
+  flex-wrap: nowrap;
+}
+
+.chat-header > div:first-child {
+  flex: 1;
+  min-width: 0;
+}
+
+.chat-header-name {
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+/* Responsive: hide sidebar on mobile, show back button */
+@media (max-width: 768px) {
+  .sidebar {
+    position: absolute;
+    left: 0; top: 0; bottom: 0;
+    z-index: 100;
+    transform: translateX(0);
+    width: 280px;
+  }
+  .sidebar.hidden { transform: translateX(-100%); }
+  .chat-app > div[style*="flex:1"] { width: 100%; }
+}

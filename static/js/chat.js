@@ -512,15 +512,15 @@ async function loadUserList(q = '') {
   users.forEach(u => {
     const li = document.createElement('li');
     li.className = 'contact-item';
-    li.dataset.userId = u.id;
+    li.setAttribute('data-user-id', u.id);
     li.innerHTML = `
       <div class="avatar">${u.username[0].toUpperCase()}</div>
       <div class="contact-info">
         <span class="contact-name">${escapeHtml(u.username)}</span>
-        ${u.is_verified_by_me ? '<span class="verified-badge" title="Public key verified">✅ Verified</span>' : ''}
+        ${u.is_verified_by_me ? '<span class="verified-badge" title="Public key verified out-of-band">✅ Verified</span>' : ''}
       </div>
       <span class="online-dot ${u.is_online ? 'online' : 'offline'}"></span>`;
-    li.onclick = () => openDM(u.id, u.username);
+    li.addEventListener('click', () => openDM(u.id, u.username));
     list.appendChild(li);
   });
 }

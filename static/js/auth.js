@@ -97,18 +97,29 @@ async function handleRegister(e) {
       }),
     });
 
-    const data = await res.json();
+    // Safe JSON parse — server might return HTML on crash
+    let data = {};
+    const contentType = res.headers.get('content-type') || '';
+    if (contentType.includes('application/json')) {
+      data = await res.json();
+    } else {
+      const text = await res.text();
+      throw new Error(`Server error (HTTP ${res.status}). Check Railway logs.`);
+    }
+
     if (!res.ok) throw new Error(data.error || 'Registration failed');
 
-    // Store email for resend flow
-    sessionStorage.setItem('pending_verify_email', email);
-
-    setStatus('reg-status', '✅ ' + data.message, 'success');
-
-    // Show dev email link button if available (dev mode only)
-    await checkAndShowDevLink('reg-status');
-
-    setTimeout(() => { window.location.href = '/login?registered=1'; }, 3000);
+    // Registration successful — token returned immediately (no email verification)
+    if (data.token) {
+      SecureStorage.saveAuthToken(data.token);
+      SecureStorage.saveUser(data.user);
+      SecureStorage.saveSettings((data.user && data.user.settings) || {});
+      setStatus('reg-status', '✅ Account created! Entering SecureIM…', 'success');
+      setTimeout(() => { window.location.href = '/chat'; }, 1200);
+    } else {
+      setStatus('reg-status', '✅ ' + (data.message || 'Registration successful!'), 'success');
+      setTimeout(() => { window.location.href = '/login'; }, 2000);
+    }
 
   } catch (err) {
     setStatus('reg-status', '❌ ' + err.message, 'error');
@@ -209,7 +220,15 @@ async function handleLogin(e) {
       }),
     });
 
-    const data = await res.json();
+    // Safe JSON parse — avoid crash if server returns HTML error page
+    let data = {};
+    const contentType = res.headers.get('content-type') || '';
+    if (contentType.includes('application/json')) {
+      data = await res.json();
+    } else {
+      const text = await res.text();
+      throw new Error(`Server error (HTTP ${res.status}). Check Railway logs.`);
+    }
 
     if (res.status === 200 && data.status === 'ok') {
       // Known device — direct login
@@ -221,10 +240,6 @@ async function handleLogin(e) {
     } else if (res.status === 202 && data.status === '2fa_required') {
       // New device — show 2FA waiting screen
       show2FAWaiting(deviceId);
-
-    } else if (res.status === 403 && data.error && data.error.includes('verify your email')) {
-      // Email not verified — show resend option
-      showResendVerification(username);
 
     } else {
       throw new Error(data.error || 'Login failed');
@@ -515,13 +530,7 @@ document.addEventListener('DOMContentLoaded', () => {
     setStatus('login-status', '✅ Email verified! You can now sign in.', 'success');
   }
   if (params.get('registered') === '1') {
-    setStatus('login-status', '📧 Registration successful! Check your email to verify your account before signing in.', 'success');
-    // Show resend option immediately after registration
-    const resendSection = document.getElementById('resend-verification');
-    if (resendSection) resendSection.style.display = 'flex';
-
-    // In dev mode, auto-show the email link modal
-    setTimeout(() => checkAndShowDevLink('login-status'), 500);
+    setStatus('login-status', '✅ Registration successful! Please sign in.', 'success');
   }
   if (params.get('error') === 'invalid_or_expired_link') {
     setStatus('login-status', '❌ That verification link is invalid or has expired. Please request a new one below.', 'error');

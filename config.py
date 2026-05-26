@@ -4,6 +4,7 @@ from dotenv import load_dotenv
 
 load_dotenv()
 
+
 class Config:
     # ── Core ────────────────────────────────────────────────────
     SECRET_KEY     = os.environ.get('SECRET_KEY', 'CHANGE-ME-IN-PRODUCTION-USE-SECRETS-TOKEN')
@@ -13,15 +14,25 @@ class Config:
     SQLALCHEMY_DATABASE_URI     = os.environ.get('DATABASE_URL', 'sqlite:///secureIM.db')
     SQLALCHEMY_TRACK_MODIFICATIONS = False
 
-    # ── Mail ─────────────────────────────────────────────────────
+    # ── Email: Resend API (recommended — free, works on Railway) ──
+    # Sign up at https://resend.com → free 3,000 emails/month
+    # Then add RESEND_API_KEY to your Railway env vars.
+    RESEND_API_KEY   = os.environ.get('RESEND_API_KEY', '')
+    # Default: onboarding@resend.dev works without domain verification.
+    # With your own domain: noreply@yourdomain.com (after verifying in Resend)
+    RESEND_FROM_EMAIL = os.environ.get('RESEND_FROM_EMAIL', 'onboarding@resend.dev')
+
+    # ── Email: SMTP fallback (optional, e.g. Gmail) ───────────────
     MAIL_SERVER         = os.environ.get('MAIL_SERVER', 'smtp.gmail.com')
     MAIL_PORT           = int(os.environ.get('MAIL_PORT', 587))
     MAIL_USE_TLS        = True
     MAIL_USERNAME       = os.environ.get('MAIL_USERNAME', '')
     MAIL_PASSWORD       = os.environ.get('MAIL_PASSWORD', '')
     MAIL_DEFAULT_SENDER = os.environ.get('MAIL_DEFAULT_SENDER', 'SecureIM <noreply@secureim.local>')
-    # True = print links to console (dev). False = send real email (prod).
-    MAIL_SUPPRESS_SEND  = os.environ.get('MAIL_SUPPRESS_SEND', 'true').lower() == 'true'
+
+    # MAIL_SUPPRESS_SEND=true  → print links to console only (local dev)
+    # MAIL_SUPPRESS_SEND=false → try Resend → SMTP → log fallback
+    MAIL_SUPPRESS_SEND = os.environ.get('MAIL_SUPPRESS_SEND', 'true').lower() == 'true'
 
     # ── Tokens ───────────────────────────────────────────────────
     JWT_EXPIRY                = timedelta(days=30)
@@ -52,8 +63,8 @@ class Config:
 class ProductionConfig(Config):
     DEBUG   = False
     TESTING = False
-    SOCKETIO_ASYNC_MODE = 'gevent'
-    # Override MAIL_SUPPRESS_SEND so emails are actually sent
+    SOCKETIO_ASYNC_MODE = os.environ.get('SOCKETIO_ASYNC_MODE', 'gevent')
+    # In production, NEVER suppress emails unless explicitly set
     MAIL_SUPPRESS_SEND = os.environ.get('MAIL_SUPPRESS_SEND', 'false').lower() == 'true'
 
 

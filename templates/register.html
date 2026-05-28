@@ -63,38 +63,6 @@
       </div>
     </div>
 
-    <!-- ── Check Email Panel (shown after successful registration) ── -->
-    <div id="email-check-panel" style="display:none; text-align:center;">
-      <div class="email-check-icon">📨</div>
-      <div class="email-check-title">Check your email</div>
-      <p class="email-check-sub">
-        We sent a verification link to<br>
-        <span id="reg-email-display" class="email-chip"></span><br>
-        Click the link to activate your account.
-      </p>
-
-      <div id="check-status" class="status-msg"></div>
-
-      <!-- Resend section (always visible in check-email panel) -->
-      <div class="resend-section visible" id="resend-panel"
-           style="text-align:left; margin-top:16px;">
-        <p>Didn't receive it? Check spam or request a new link.</p>
-        <form id="resend-form" novalidate>
-          <div class="field" style="margin-bottom:10px">
-            <input type="email" id="resend-email" placeholder="your@email.com" required>
-          </div>
-          <div id="resend-status" class="status-msg"></div>
-          <button type="submit" id="resend-btn" class="btn btn-secondary btn-sm">
-            <span class="btn-text">Resend Verification Email</span>
-          </button>
-        </form>
-      </div>
-
-      <div class="auth-footer" style="margin-top: 20px;">
-        Already verified? <a href="/login">Sign in</a>
-      </div>
-    </div>
-
   </div>
 </div>
 

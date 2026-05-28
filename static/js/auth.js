@@ -130,13 +130,13 @@ async function handleRegister(e) {
       throw new Error(data.detail || data.error || 'Registration failed');
     }
 
-    // ── Email verification required ────────────────────────────
-    // Server returns {status:'verification_sent', email:'...'}
-    // Show "check your email" panel on THIS page (register.html)
-    if (data.status === 'verification_sent') {
-      showEmailCheckPanel(data.email || email);
-      // In dev mode, auto-show the dev link modal
-      await checkAndShowDevLink('reg-status');
+    // Registration returns JWT + user — save and redirect to chat
+    if (data.token && data.user) {
+      SecureStorage.saveAuthToken(data.token);
+      SecureStorage.saveUser(data.user);
+      SecureStorage.saveSettings(data.user.settings || {});
+      setStatus('reg-status', '✅ Account created! Redirecting…', 'success');
+      window.location.href = '/chat';
     } else {
       setStatus('reg-status', '✅ ' + (data.message || 'Done!'), 'success');
     }
@@ -248,29 +248,11 @@ async function handleLogin(e) {
     }
 
     if (res.status === 200 && data.status === 'ok') {
-      // Known device — direct login
+      // Login successful — save credentials and redirect to chat
       SecureStorage.saveAuthToken(data.token);
       SecureStorage.saveUser(data.user);
       SecureStorage.saveSettings(data.user.settings || {});
       window.location.href = '/chat';
-
-    } else if ((res.status === 202 || res.status === 200) && data.status === '2fa_required') {
-      // New device — show 2FA waiting screen + dev link if available
-      show2FAWaiting(deviceId);
-      await checkAndShowDevLink('login-status');
-
-    } else if (res.status === 403) {
-      // Email not verified
-      const errorCode = res.headers.get('X-Error-Code') || '';
-      if (errorCode === 'email_not_verified' || (data.detail || '').toLowerCase().includes('not verified')) {
-        showResendSection();
-        setStatus('login-status',
-          '⚠️ Your email is not verified. Check your inbox or request a new link below.',
-          'warning');
-      } else {
-        throw new Error(data.detail || 'Access denied');
-      }
-      setBtnLoading('login-btn', false, 'Sign In');
 
     } else {
       throw new Error(data.detail || data.error || 'Login failed');
@@ -500,36 +482,4 @@ document.addEventListener('DOMContentLoaded', () => {
   // ── Login page ─────────────────────────────────────────────
   const loginForm = document.getElementById('login-form');
   if (loginForm) loginForm.addEventListener('submit', handleLogin);
-
-  // Cancel 2FA
-  const cancelBtn = document.getElementById('cancel-2fa-btn');
-  if (cancelBtn) cancelBtn.addEventListener('click', cancel2FA);
-
-  // Resend verification forms (exist on both login + register pages in check-email state)
-  const resendForms = document.querySelectorAll('#resend-form');
-  resendForms.forEach(f => f.addEventListener('submit', handleResendVerification));
-
-  // Dev links button (visible on login page in dev mode)
-  const devLinksBtn = document.getElementById('dev-links-btn');
-  if (devLinksBtn) {
-    // Show the button itself only if dev mode
-    fetch(`${API}/dev-links`).then(r => {
-      if (r.ok) devLinksBtn.style.display = 'inline-flex';
-    }).catch(() => {});
-    devLinksBtn.addEventListener('click', openDevLinks);
-  }
-
-  // ── Query-string feedback ──────────────────────────────────
-  const params = new URLSearchParams(window.location.search);
-  if (params.get('verified') === '1') {
-    setStatus('login-status', '✅ Email verified! You can now sign in.', 'success');
-  }
-  if (params.get('error') === 'invalid_or_expired_link') {
-    setStatus('login-status',
-      '❌ That link is invalid or has expired. Request a new one below.', 'error');
-    showResendSection();
-  }
-  if (params.get('error') === 'invalid_or_expired_2fa') {
-    setStatus('login-status', '❌ 2FA link expired. Please log in again.', 'error');
-  }
 });

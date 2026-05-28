@@ -43,45 +43,9 @@
         </button>
       </form>
 
-      <!-- Resend verification — shown when email_not_verified error -->
-      <div id="resend-section" class="resend-section">
-        <p>📧 <strong>Haven't received your verification email?</strong><br>
-           Enter your email address to receive a new confirmation link.</p>
-        <form id="resend-form" novalidate>
-          <div class="field" style="margin-bottom:10px">
-            <input type="email" id="resend-email" placeholder="your@email.com" required>
-          </div>
-          <div id="resend-status" class="status-msg"></div>
-          <button type="submit" id="resend-btn" class="btn btn-secondary btn-sm">
-            <span class="btn-text">Resend Verification Email</span>
-          </button>
-        </form>
-      </div>
-
-      <!-- Dev links button -->
-      <div style="margin-top:14px; text-align:center;">
-        <button id="dev-links-btn" class="btn btn-ghost btn-sm"
-                style="display:none; width:auto; padding:6px 14px; font-size:12px;">
-          🛠️ Dev Email Links
-        </button>
-      </div>
-
       <div class="auth-footer">
         Don't have an account? <a href="/register">Create one</a>
       </div>
-    </div>
-
-    <!-- ── 2FA Waiting ───────────────────────────────────── -->
-    <div id="two-fa-waiting" style="display:none; text-align:center;">
-      <div class="waiting-icon">📧</div>
-      <div class="waiting-title">Check your email</div>
-      <p class="waiting-sub">
-        A device authorization link has been sent to your email.<br>
-        Click the link to complete sign in.
-      </p>
-      <button id="cancel-2fa-btn" class="btn btn-ghost btn-sm" style="width:auto; margin: 0 auto;">
-        Cancel
-      </button>
     </div>
 
   </div>

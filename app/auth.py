@@ -15,10 +15,10 @@ Endpoints:
   DELETE /api/auth/devices/{device_id}
   GET    /api/auth/dev-links             (dev mode only)
 
-Email verification change:
-  - Registration NO LONGER auto-verifies users.
-  - Returns {status:'verification_sent'} → frontend shows "check your email" panel.
-  - Login rejects unverified accounts with code 'email_not_verified'.
+TESTING MODE — email verification & 2FA bypassed:
+  - Registration auto-verifies and returns {status:'ok'} with a JWT.
+  - Login auto-activates new devices (no 2FA email required).
+  - All email endpoints still exist but are effectively unused.
 """
 import json
 from datetime import datetime
@@ -145,49 +145,39 @@ def register(request: Request, body: RegisterBody, db: Session = Depends(get_db)
     if db.query(User).filter_by(email=email).first():
         raise HTTPException(status_code=409, detail='Email already registered')
 
-    # Create user — email NOT yet verified
+    # Create user — auto-verified, no email confirmation needed
     user = User(
         username=username,
         email=email,
         password_hash=hash_password(password),
-        is_email_verified=False,   # <── real verification required
+        is_email_verified=True,
     )
     db.add(user)
     db.flush()  # get user.id
 
-    # Register first device (inactive until email verified)
+    # Register first device — auto-activated, no email needed
     device = DeviceKey(
         user_id=user.id,
         device_id=device_id,
         ecdsa_public_key=ecdsa_public_key,
         ecdh_public_key=ecdh_public_key,
         device_name=device_name,
-        is_active=False,  # activated after email verification
+        is_active=True,
     )
     db.add(device)
-
-    # Create email verification token
-    exp = datetime.utcnow() + settings.EMAIL_VERIFY_TOKEN_EXPIRY
-    ev = EmailVerification(
-        user_id=user.id,
-        token=generate_secure_token(),
-        verification_type='email_verify',
-        device_id=device_id,          # so we can activate the device on verify
-        expires_at=exp,
-    )
-    db.add(ev)
     db.commit()
 
-    # Send verification email (non-blocking — fires and returns)
-    send_verification_email(user, ev.token)
+    # Issue JWT immediately so frontend can redirect to /chat
+    token = generate_jwt(user.id, device_id)
 
     _audit(db, 'register', request, user_id=user.id,
            detail={'username': username, 'email': email})
 
     return {
-        'status':  'verification_sent',
-        'message': 'Account created! Please check your email and click the activation link.',
-        'email':   email,
+        'status':  'ok',
+        'token':   token,
+        'user':    user.to_dict(),
+        'message': 'Account created — welcome to SecureIM!',
     }
 
 
@@ -279,13 +269,9 @@ def login(request: Request, body: LoginBody, db: Session = Depends(get_db)):
         _audit(db, 'login_fail', request, detail={'username': username})
         raise HTTPException(status_code=401, detail='Invalid username or password')
 
-    # Reject unverified accounts
+    # Auto-verify any unverified users (testing mode)
     if not user.is_email_verified:
-        raise HTTPException(
-            status_code=403,
-            detail='Email not verified. Please check your inbox or request a new link.',
-            headers={'X-Error-Code': 'email_not_verified'},
-        )
+        user.is_email_verified = True
 
     # Rehash if params changed
     if needs_rehash(user.password_hash):
@@ -310,7 +296,7 @@ def login(request: Request, body: LoginBody, db: Session = Depends(get_db)):
         return {'status': 'ok', 'token': token, 'user': user.to_dict()}
 
     else:
-        # New device — require 2FA email
+        # New device — auto-activate (no 2FA email in testing mode)
         if not ecdsa_public_key or not ecdh_public_key:
             raise HTTPException(
                 status_code=400,
@@ -323,27 +309,15 @@ def login(request: Request, body: LoginBody, db: Session = Depends(get_db)):
             ecdsa_public_key=ecdsa_public_key,
             ecdh_public_key=ecdh_public_key,
             device_name=device_name,
-            is_active=False,
+            is_active=True,  # Auto-activated for testing
         )
         db.add(new_device)
-
-        exp = datetime.utcnow() + settings.VERIFICATION_TOKEN_EXPIRY
-        ev = EmailVerification(
-            user_id=user.id,
-            token=generate_secure_token(),
-            verification_type='2fa_login',
-            device_id=device_id,
-            expires_at=exp,
-        )
-        db.add(ev)
         db.commit()
 
-        send_2fa_email(user, device_name, ev.token)
-        return {
-            'status':    '2fa_required',
-            'device_id': device_id,
-            'message':   'Check your email to authorize this device.',
-        }, 202
+        token = generate_jwt(user.id, device_id)
+        _audit(db, 'login_ok', request, user_id=user.id,
+               detail={'device_id': device_id, 'new_device': True})
+        return {'status': 'ok', 'token': token, 'user': user.to_dict()}
 
 
 # ── 2FA Device Authorization (link click) ─────────────────────────

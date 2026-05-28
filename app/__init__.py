@@ -1,66 +1,79 @@
-from flask import Flask
-from flask_sqlalchemy import SQLAlchemy
-from flask_socketio import SocketIO
-from flask_cors import CORS
-from flask_mail import Mail
-from config import config_map
+"""
+FastAPI application factory.
+Replaces Flask create_app() — returns a python-socketio ASGIApp
+that wraps the FastAPI app (handles both HTTP and WebSocket traffic).
+"""
 import os
+import socketio as _sio_lib
 
-db       = SQLAlchemy()
-socketio = SocketIO()
-mail     = Mail()
+from fastapi import FastAPI
+from fastapi.staticfiles import StaticFiles
+from fastapi.middleware.cors import CORSMiddleware
+from slowapi import _rate_limit_exceeded_handler
+from slowapi.errors import RateLimitExceeded
+
+from app.socket_manager import sio
+
+_static_dir    = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), 'static')
+_templates_dir = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), 'templates')
 
 
-def create_app(env: str | None = None):
-    env = env or os.environ.get('FLASK_ENV', 'development')
-    config_class = config_map.get(env, config_map['default'])
+def create_app():
+    # ── Create tables ──────────────────────────────────────────────
+    from app.database import engine, Base
+    import app.models  # registers all ORM classes  # noqa: F401
+    Base.metadata.create_all(bind=engine)
 
-    app = Flask(
-        __name__,
-        template_folder=os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), 'templates'),
-        static_folder=os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), 'static'),
-        instance_path=os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), 'instance'),
-        instance_relative_config=False,
+    # ── FastAPI app ────────────────────────────────────────────────
+    app = FastAPI(
+        title='SecureIM',
+        description='Zero-trust E2EE messaging system',
+        version='2.0.0',
+        docs_url=None,    # disable Swagger in all envs (security)
+        redoc_url=None,
     )
-    app.config.from_object(config_class)
 
-    # Extensions
-    db.init_app(app)
-    CORS(app, resources={r'/api/*': {'origins': '*'}})
-    mail.init_app(app)
-    socketio.init_app(
-        app,
-        async_mode=app.config['SOCKETIO_ASYNC_MODE'],
-        cors_allowed_origins='*',
-        logger=False,
-        engineio_logger=False,
+    # CORS — restrict in production via env vars
+    app.add_middleware(
+        CORSMiddleware,
+        allow_origins=['*'],
+        allow_credentials=True,
+        allow_methods=['*'],
+        allow_headers=['*'],
     )
+
+    # Security headers
+    from app.security import SecurityHeadersMiddleware
+    app.add_middleware(SecurityHeadersMiddleware)
+
+    # Static files (/static/*)
+    app.mount('/static', StaticFiles(directory=_static_dir), name='static')
 
     # Rate limiter
     from app.limiter import limiter
-    limiter.init_app(app)
+    app.state.limiter = limiter
+    app.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)
 
-    # Security headers (CSP etc.)
-    from app.security import init_security
-    init_security(app)
+    # Routers
+    from app.auth  import router as auth_router
+    from app.chat  import router as chat_router   # also registers sio events
+    from app.routes import router as routes_router
 
-    # Blueprints
-    from app.auth   import auth_bp
-    from app.chat   import chat_bp
-    from app.routes import routes_bp
-    app.register_blueprint(auth_bp,   url_prefix='/api/auth')
-    app.register_blueprint(chat_bp,   url_prefix='/api/chat')
-    app.register_blueprint(routes_bp)
+    app.include_router(auth_router,   prefix='/api/auth', tags=['auth'])
+    app.include_router(chat_router,   prefix='/api/chat', tags=['chat'])
+    app.include_router(routes_router, tags=['pages'])
 
-    # SocketIO handlers
-    from app import chat as _chat_events  # noqa: F401
+    # Health check
+    @app.get('/api/health')
+    def health():
+        return {'status': 'ok', 'service': 'SecureIM'}
 
-    with app.app_context():
-        db.create_all()
+    # ── Background scheduler ───────────────────────────────────────
+    from app.scheduler import start_scheduler
+    start_scheduler()
 
-    # Background scheduler (only in main process, not reloader child)
-    if not app.debug or os.environ.get('WERKZEUG_RUN_MAIN') == 'true':
-        from app.scheduler import start_scheduler
-        start_scheduler(app)
-
-    return app
+    # ── Wrap with python-socketio ASGI app ─────────────────────────
+    # The socketio ASGIApp intercepts /socket.io/* requests;
+    # everything else is passed through to FastAPI.
+    asgi_app = _sio_lib.ASGIApp(sio, other_asgi_app=app, socketio_path='/socket.io')
+    return asgi_app

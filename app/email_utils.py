@@ -1,25 +1,25 @@
 """
-Email utility — gửi verification/2FA emails.
+Email utility — sends verification/2FA emails.
 
-Thứ tự ưu tiên engine:
-  1. Resend API  (set RESEND_API_KEY) — khuyến nghị, miễn phí 3000/tháng
-  2. SMTP        (set MAIL_SERVER + MAIL_USERNAME + MAIL_PASSWORD) — Gmail, v.v.
-  3. Dev mode    (MAIL_SUPPRESS_SEND=true) — chỉ in link ra console/terminal
+Engine priority:
+  1. Resend API  (set RESEND_API_KEY) — recommended, free 3 000/month
+  2. SMTP        (set MAIL_SERVER + MAIL_USERNAME + MAIL_PASSWORD) — Gmail, etc.
+  3. Dev mode    (MAIL_SUPPRESS_SEND=true) — prints link to console only
 
-Setup Resend (miễn phí, không cần thẻ):
-  1. Đăng ký tại https://resend.com
-  2. API Keys → Create API Key
-  3. Thêm env var: RESEND_API_KEY=re_xxxxxxxxxxxx
-  4. Nếu chưa có domain: để RESEND_FROM_EMAIL=onboarding@resend.dev (hoạt động ngay)
-     Nếu có domain riêng: verify domain trong Resend, dùng noreply@yourdomain.com
+Removed Flask-Mail dependency. All config read from settings singleton.
 """
 import json
+import smtplib
 import urllib.request
 import urllib.error
+from email.mime.multipart import MIMEMultipart
+from email.mime.text import MIMEText
 
-from flask import current_app, render_template_string
-from flask_mail import Message
-from app import mail
+from jinja2 import Environment as _JinjaEnv
+
+from config import settings
+
+_jinja = _JinjaEnv()
 
 # ── Email templates ───────────────────────────────────────────────
 
@@ -78,16 +78,15 @@ _2FA_EMAIL_BODY = """\
 _dev_link_buffer: list[dict] = []
 
 
+def _render(template_str: str, **kwargs) -> str:
+    return _jinja.from_string(template_str).render(**kwargs)
+
+
 # ── Resend API sender ─────────────────────────────────────────────
 
 def _send_via_resend(subject: str, recipient_email: str, html_body: str) -> bool:
-    """
-    Send email via Resend HTTP API.
-    Returns True on success, False on failure.
-    Docs: https://resend.com/docs/api-reference/emails/send-email
-    """
-    api_key   = current_app.config.get('RESEND_API_KEY', '')
-    from_addr = current_app.config.get('RESEND_FROM_EMAIL', 'onboarding@resend.dev')
+    api_key   = settings.RESEND_API_KEY
+    from_addr = settings.RESEND_FROM_EMAIL
 
     if not api_key:
         return False
@@ -112,37 +111,34 @@ def _send_via_resend(subject: str, recipient_email: str, html_body: str) -> bool
     try:
         with urllib.request.urlopen(req, timeout=10) as resp:
             result = json.loads(resp.read())
-            email_id = result.get('id', 'unknown')
-            print(f'[EMAIL OK] Resend id={email_id} to={recipient_email} from={from_addr}')
+            print(f'[EMAIL OK] Resend id={result.get("id")} to={recipient_email}')
             return True
     except urllib.error.HTTPError as e:
         body = e.read().decode('utf-8', errors='replace')
-        print(f'[EMAIL ERROR] Resend HTTP {e.code} from={from_addr} to={recipient_email}')
-        print(f'[EMAIL ERROR] Resend body: {body}')
-        if e.code == 403:
-            print('[EMAIL ERROR] 403 = domain chưa verify HOẶC gửi tới email ngoài whitelist (onboarding@resend.dev chỉ gửi tới email đăng ký Resend của bạn)')
-        if e.code == 422:
-            print('[EMAIL ERROR] 422 = RESEND_API_KEY sai hoặc hết hạn')
+        print(f'[EMAIL ERROR] Resend HTTP {e.code}: {body}')
         return False
     except Exception as e:
         print(f'[EMAIL ERROR] Resend exception: {type(e).__name__}: {e}')
         return False
 
 
-# ── SMTP sender (Flask-Mail fallback) ────────────────────────────
+# ── SMTP sender (smtplib fallback) ────────────────────────────────
 
 def _send_via_smtp(subject: str, recipient_email: str, html_body: str) -> bool:
-    """
-    Send email via configured SMTP server (Flask-Mail).
-    Returns True on success, False on failure.
-    """
-    smtp_user = current_app.config.get('MAIL_USERNAME', '')
-    if not smtp_user:
+    if not settings.MAIL_USERNAME:
         return False
-
     try:
-        msg = Message(subject=subject, recipients=[recipient_email], html=html_body)
-        mail.send(msg)
+        msg = MIMEMultipart('alternative')
+        msg['Subject'] = subject
+        msg['From']    = settings.MAIL_DEFAULT_SENDER
+        msg['To']      = recipient_email
+        msg.attach(MIMEText(html_body, 'html'))
+
+        with smtplib.SMTP(settings.MAIL_SERVER, settings.MAIL_PORT) as server:
+            server.ehlo()
+            server.starttls()
+            server.login(settings.MAIL_USERNAME, settings.MAIL_PASSWORD)
+            server.sendmail(settings.MAIL_DEFAULT_SENDER, recipient_email, msg.as_string())
         print(f'[EMAIL] Sent via SMTP to={recipient_email}')
         return True
     except Exception as e:
@@ -153,13 +149,10 @@ def _send_via_smtp(subject: str, recipient_email: str, html_body: str) -> bool:
 # ── Main send dispatcher ──────────────────────────────────────────
 
 def _send(subject: str, recipient_email: str, html_body: str, link: str):
-    """
-    Send an email using the best available engine.
-    Priority: Resend API → SMTP → Dev console log.
-    """
+    """Send an email using the best available engine."""
 
     # 1. Dev suppress mode — print to terminal only
-    if current_app.config.get('MAIL_SUPPRESS_SEND', False):
+    if settings.MAIL_SUPPRESS_SEND:
         entry = {'to': recipient_email, 'subject': subject, 'link': link}
         _dev_link_buffer.append(entry)
         if len(_dev_link_buffer) > 10:
@@ -172,7 +165,7 @@ def _send(subject: str, recipient_email: str, html_body: str, link: str):
         print('═' * 70 + '\n')
         return
 
-    # 2. Try Resend API (recommended — free, works on Railway)
+    # 2. Try Resend API
     if _send_via_resend(subject, recipient_email, html_body):
         return
 
@@ -180,15 +173,13 @@ def _send(subject: str, recipient_email: str, html_body: str, link: str):
     if _send_via_smtp(subject, recipient_email, html_body):
         return
 
-    # 4. All methods failed — log the link so admin can manually share it
+    # 4. All methods failed — log the link
     print('\n' + '⚠' * 70)
     print(f'[EMAIL FAILED] Could not send email to {recipient_email}')
-    print(f'[EMAIL FAILED] Subject: {subject}')
     print(f'[EMAIL FAILED] Link: {link}')
     print(f'[EMAIL FAILED] Set RESEND_API_KEY env var to enable email sending.')
     print('⚠' * 70 + '\n')
 
-    # Store in dev buffer even in production so admin can retrieve via /api/auth/dev-links
     entry = {'to': recipient_email, 'subject': subject, 'link': link}
     _dev_link_buffer.append(entry)
     if len(_dev_link_buffer) > 10:
@@ -198,13 +189,13 @@ def _send(subject: str, recipient_email: str, html_body: str, link: str):
 # ── Public send functions ─────────────────────────────────────────
 
 def send_verification_email(user, token: str):
-    link = f"{current_app.config['BASE_URL']}/verify-email?token={token}"
-    html = render_template_string(_VERIFY_EMAIL_BODY, username=user.username, link=link)
+    link = f"{settings.BASE_URL}/verify-email?token={token}"
+    html = _render(_VERIFY_EMAIL_BODY, username=user.username, link=link)
     _send("Activate your SecureIM account", user.email, html, link)
 
 
 def send_2fa_email(user, device_name: str, token: str):
-    link = f"{current_app.config['BASE_URL']}/authorize-device?token={token}"
-    html = render_template_string(_2FA_EMAIL_BODY, username=user.username,
-                                  device_name=device_name, link=link)
+    link = f"{settings.BASE_URL}/authorize-device?token={token}"
+    html = _render(_2FA_EMAIL_BODY, username=user.username,
+                   device_name=device_name, link=link)
     _send("SecureIM — Authorize new device", user.email, html, link)

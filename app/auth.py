@@ -1,250 +1,322 @@
 """
-Authentication blueprint — handles:
-  POST /api/auth/register
-  POST /api/auth/login
-  POST /api/auth/logout
-  GET  /api/auth/verify-email   (email activation link)
-  GET  /api/auth/2fa-verify     (device authorization link)
-  GET  /api/auth/2fa-status     (polling endpoint — returns JWT when device authorized)
-  GET  /api/auth/me             (current user info)
-  PUT  /api/auth/settings       (update user settings)
-  GET  /api/auth/devices        (list user's devices)
-  DELETE /api/auth/devices/<device_id>  (revoke a device)
+Authentication API router — FastAPI conversion.
+
+Endpoints:
+  POST   /api/auth/register
+  POST   /api/auth/login
+  POST   /api/auth/logout
+  POST   /api/auth/resend-verification
+  GET    /api/auth/verify-email          (email link click → redirect)
+  GET    /api/auth/2fa-verify            (device auth link → redirect)
+  GET    /api/auth/2fa-status            (polling)
+  GET    /api/auth/me
+  PUT    /api/auth/settings
+  GET    /api/auth/devices
+  DELETE /api/auth/devices/{device_id}
+  GET    /api/auth/dev-links             (dev mode only)
+
+Email verification change:
+  - Registration NO LONGER auto-verifies users.
+  - Returns {status:'verification_sent'} → frontend shows "check your email" panel.
+  - Login rejects unverified accounts with code 'email_not_verified'.
 """
+import json
 from datetime import datetime
-from functools import wraps
+from typing import Optional
 
-from flask import Blueprint, request, jsonify, current_app, redirect
+from fastapi import APIRouter, Depends, HTTPException, Request
+from fastapi.responses import RedirectResponse
+from pydantic import BaseModel
+from sqlalchemy.orm import Session
 
-from app import db
+from app.database import get_db
 from app.models import User, DeviceKey, EmailVerification, AuditLog
 from app.limiter import limiter
 from app.crypto_utils import (
     hash_password, verify_password, needs_rehash,
     generate_jwt, decode_jwt, generate_secure_token,
 )
-from app.email_utils import send_verification_email, send_2fa_email
+from app.email_utils import send_verification_email, send_2fa_email, _dev_link_buffer
+from config import settings
 
-auth_bp = Blueprint('auth', __name__)
+router = APIRouter()
 
 
-def _audit(event_type: str, user_id=None, detail: dict | None = None):
-    """Record a security event. Never logs message content."""
+# ── Auth dependency ────────────────────────────────────────────────
+
+def get_current_user_and_device(
+    request: Request,
+    db: Session = Depends(get_db),
+):
+    """Validates the Bearer JWT and returns (user, device) or raises 401."""
+    auth_header = request.headers.get('Authorization', '')
+    if not auth_header.startswith('Bearer '):
+        raise HTTPException(status_code=401, detail='Missing authorization token')
+    token = auth_header.split(' ', 1)[1]
+    payload = decode_jwt(token)
+    if not payload:
+        raise HTTPException(status_code=401, detail='Invalid or expired token')
+
+    user = db.get(User, int(payload['sub']))
+    if not user:
+        raise HTTPException(status_code=401, detail='User not found')
+
+    device = db.query(DeviceKey).filter_by(
+        user_id=user.id,
+        device_id=payload['device_id'],
+        is_active=True,
+    ).first()
+    if not device:
+        raise HTTPException(status_code=401, detail='Device not authorized')
+
+    device.last_seen = datetime.utcnow()
+    db.commit()
+    return user, device
+
+
+# ── Audit helper ───────────────────────────────────────────────────
+
+def _audit(db: Session, event_type: str, request: Request,
+           user_id=None, detail: dict | None = None):
     try:
         entry = AuditLog(
             event_type=event_type,
             user_id=user_id,
-            ip_address=request.remote_addr,
+            ip_address=request.client.host if request.client else None,
             user_agent=request.headers.get('User-Agent', '')[:256],
-            detail=__import__('json').dumps(detail or {}),
+            detail=json.dumps(detail or {}),
         )
-        db.session.add(entry)
-        db.session.commit()
+        db.add(entry)
+        db.commit()
     except Exception:
         pass  # Audit must never break the main flow
 
 
-# ── Auth decorator ─────────────────────────────────────────────────
+# ── Pydantic request models ────────────────────────────────────────
 
-def token_required(f):
-    """Decorator that validates the Bearer JWT and injects current_user, device_id."""
-    @wraps(f)
-    def decorated(*args, **kwargs):
-        auth_header = request.headers.get('Authorization', '')
-        if not auth_header.startswith('Bearer '):
-            return jsonify({'error': 'Missing authorization token'}), 401
-        token = auth_header.split(' ', 1)[1]
-        payload = decode_jwt(token)
-        if not payload:
-            return jsonify({'error': 'Invalid or expired token'}), 401
-
-        user = User.query.get(int(payload['sub']))
-        if not user:
-            return jsonify({'error': 'User not found'}), 401
-
-        device = DeviceKey.query.filter_by(
-            user_id=user.id,
-            device_id=payload['device_id'],
-            is_active=True
-        ).first()
-        if not device:
-            return jsonify({'error': 'Device not authorized'}), 401
-
-        # Update last-seen
-        device.last_seen = datetime.utcnow()
-        db.session.commit()
-
-        return f(user, device, *args, **kwargs)
-    return decorated
+class RegisterBody(BaseModel):
+    username:         str
+    email:            str
+    password:         str
+    ecdsa_public_key: str
+    ecdh_public_key:  str
+    device_id:        str
+    device_name:      Optional[str] = 'Browser'
 
 
-# ── Register ──────────────────────────────────────────────────────
+class LoginBody(BaseModel):
+    username:         str
+    password:         str
+    device_id:        str
+    device_name:      Optional[str] = 'Browser'
+    ecdsa_public_key: Optional[str] = None
+    ecdh_public_key:  Optional[str] = None
 
-@auth_bp.route('/register', methods=['POST'])
-@limiter.limit('5 per hour')
-def register():
-    data = request.get_json(silent=True) or {}
-    username         = (data.get('username') or '').strip().lower()
-    email            = (data.get('email') or '').strip().lower()
-    password         = data.get('password') or ''
-    ecdsa_public_key = data.get('ecdsa_public_key')   # JWK JSON string
-    ecdh_public_key  = data.get('ecdh_public_key')    # JWK JSON string
-    device_id        = data.get('device_id')
-    device_name      = data.get('device_name', 'Browser')
 
-    # Basic validation
-    if not all([username, email, password, ecdsa_public_key, ecdh_public_key, device_id]):
-        return jsonify({'error': 'All fields are required'}), 400
+class ResendVerificationBody(BaseModel):
+    email: str
+
+
+class SettingsBody(BaseModel):
+    store_history: Optional[bool] = None
+    session_mode:  Optional[bool] = None
+
+
+# ── Register ───────────────────────────────────────────────────────
+
+@router.post('/register', status_code=201)
+@limiter.limit('5/hour')
+def register(request: Request, body: RegisterBody, db: Session = Depends(get_db)):
+    username         = body.username.strip().lower()
+    email            = body.email.strip().lower()
+    password         = body.password
+    ecdsa_public_key = body.ecdsa_public_key
+    ecdh_public_key  = body.ecdh_public_key
+    device_id        = body.device_id
+    device_name      = body.device_name or 'Browser'
+
+    # Validation
     if len(username) < 3 or len(username) > 30:
-        return jsonify({'error': 'Username must be 3–30 characters'}), 400
+        raise HTTPException(status_code=400, detail='Username must be 3–30 characters')
     if len(password) < 8:
-        return jsonify({'error': 'Password must be at least 8 characters'}), 400
-    if User.query.filter_by(username=username).first():
-        return jsonify({'error': 'Username already taken'}), 409
-    if User.query.filter_by(email=email).first():
-        return jsonify({'error': 'Email already registered'}), 409
+        raise HTTPException(status_code=400, detail='Password must be at least 8 characters')
+    if db.query(User).filter_by(username=username).first():
+        raise HTTPException(status_code=409, detail='Username already taken')
+    if db.query(User).filter_by(email=email).first():
+        raise HTTPException(status_code=409, detail='Email already registered')
 
-    # Create user — auto-verified (email verification disabled)
+    # Create user — email NOT yet verified
     user = User(
         username=username,
         email=email,
         password_hash=hash_password(password),
-        is_email_verified=True,   # <-- auto verify, no email needed
+        is_email_verified=False,   # <── real verification required
     )
-    db.session.add(user)
-    db.session.flush()  # get user.id
+    db.add(user)
+    db.flush()  # get user.id
 
-    # Register first device (active immediately)
+    # Register first device (inactive until email verified)
     device = DeviceKey(
         user_id=user.id,
         device_id=device_id,
         ecdsa_public_key=ecdsa_public_key,
         ecdh_public_key=ecdh_public_key,
         device_name=device_name,
-        is_active=True,
+        is_active=False,  # activated after email verification
     )
-    db.session.add(device)
-    db.session.commit()
+    db.add(device)
 
-    # Issue JWT immediately — user can login right away
-    token = generate_jwt(user.id, device_id)
-    _audit('register', user_id=user.id, detail={'username': username, 'auto_verified': True})
-    return jsonify({
-        'message': 'Registration successful.',
-        'status': 'ok',
-        'token': token,
-        'user': user.to_dict(),
-    }), 201
+    # Create email verification token
+    exp = datetime.utcnow() + settings.EMAIL_VERIFY_TOKEN_EXPIRY
+    ev = EmailVerification(
+        user_id=user.id,
+        token=generate_secure_token(),
+        verification_type='email_verify',
+        device_id=device_id,          # so we can activate the device on verify
+        expires_at=exp,
+    )
+    db.add(ev)
+    db.commit()
+
+    # Send verification email (non-blocking — fires and returns)
+    send_verification_email(user, ev.token)
+
+    _audit(db, 'register', request, user_id=user.id,
+           detail={'username': username, 'email': email})
+
+    return {
+        'status':  'verification_sent',
+        'message': 'Account created! Please check your email and click the activation link.',
+        'email':   email,
+    }
 
 
-# ── Resend Verification Email ─────────────────────────────────────
+# ── Resend Verification ────────────────────────────────────────────
 
-@auth_bp.route('/resend-verification', methods=['POST'])
-@limiter.limit('3 per hour')
-def resend_verification():
-    data  = request.get_json(silent=True) or {}
-    email = (data.get('email') or '').strip().lower()
+@router.post('/resend-verification')
+@limiter.limit('3/hour')
+def resend_verification(
+    request: Request,
+    body: ResendVerificationBody,
+    db: Session = Depends(get_db),
+):
+    email = body.email.strip().lower()
     if not email:
-        return jsonify({'error': 'Email is required'}), 400
+        raise HTTPException(status_code=400, detail='Email is required')
 
-    user = User.query.filter_by(email=email).first()
+    user = db.query(User).filter_by(email=email).first()
     # Always return success to avoid email enumeration
     if not user:
-        return jsonify({'message': 'If that email is registered, a new verification link has been sent.'}), 200
+        return {'message': 'If that email is registered, a new verification link has been sent.'}
 
     if user.is_email_verified:
-        return jsonify({'error': 'This account is already verified. Please sign in.'}), 400
+        raise HTTPException(status_code=400, detail='This account is already verified. Please sign in.')
 
-    # Invalidate any existing unused tokens
-    old_evs = EmailVerification.query.filter_by(
+    # Invalidate existing unused tokens
+    old_evs = db.query(EmailVerification).filter_by(
         user_id=user.id, verification_type='email_verify', is_used=False
     ).all()
     for old in old_evs:
         old.is_used = True
 
-    # Create fresh token
-    exp = datetime.utcnow() + current_app.config['EMAIL_VERIFY_TOKEN_EXPIRY']
+    # Fresh token
+    exp = datetime.utcnow() + settings.EMAIL_VERIFY_TOKEN_EXPIRY
     ev = EmailVerification(
         user_id=user.id,
         token=generate_secure_token(),
         verification_type='email_verify',
         expires_at=exp,
     )
-    db.session.add(ev)
-    db.session.commit()
+    db.add(ev)
+    db.commit()
 
     send_verification_email(user, ev.token)
-    _audit('resend_verification', user_id=user.id)
-    return jsonify({'message': 'A new verification email has been sent. Please check your inbox.'}), 200
+    _audit(db, 'resend_verification', request, user_id=user.id)
+    return {'message': 'A new verification email has been sent. Please check your inbox.'}
 
 
-# ── Email verification (link click) ───────────────────────────────
+# ── Email Verification (link click) ───────────────────────────────
 
-@auth_bp.route('/verify-email', methods=['GET'])
-def verify_email():
-    token = request.args.get('token', '')
-    ev = EmailVerification.query.filter_by(token=token, verification_type='email_verify', is_used=False).first()
+@router.get('/verify-email')
+def verify_email(token: str = '', db: Session = Depends(get_db)):
+    ev = db.query(EmailVerification).filter_by(
+        token=token, verification_type='email_verify', is_used=False
+    ).first()
+
     if not ev or ev.is_expired():
-        return redirect('/?error=invalid_or_expired_link')
+        return RedirectResponse(url='/?error=invalid_or_expired_link')
 
     ev.is_used = True
     ev.user.is_email_verified = True
-    db.session.commit()
-    _audit('email_verified', user_id=ev.user_id)
-    return redirect('/login?verified=1')
+
+    # Also activate the device that was registered alongside
+    if ev.device_id:
+        device = db.query(DeviceKey).filter_by(
+            user_id=ev.user_id, device_id=ev.device_id
+        ).first()
+        if device:
+            device.is_active = True
+            device.last_seen = datetime.utcnow()
+
+    db.commit()
+    return RedirectResponse(url='/login?verified=1')
 
 
-# ── Login ─────────────────────────────────────────────────────────
+# ── Login ──────────────────────────────────────────────────────────
 
-@auth_bp.route('/login', methods=['POST'])
-@limiter.limit('10 per minute')
-def login():
-    data = request.get_json(silent=True) or {}
-    username         = (data.get('username') or '').strip().lower()
-    password         = data.get('password') or ''
-    device_id        = data.get('device_id')
-    device_name      = data.get('device_name', 'Browser')
-    ecdsa_public_key = data.get('ecdsa_public_key')
-    ecdh_public_key  = data.get('ecdh_public_key')
+@router.post('/login')
+@limiter.limit('10/minute')
+def login(request: Request, body: LoginBody, db: Session = Depends(get_db)):
+    username         = body.username.strip().lower()
+    password         = body.password
+    device_id        = body.device_id
+    device_name      = body.device_name or 'Browser'
+    ecdsa_public_key = body.ecdsa_public_key
+    ecdh_public_key  = body.ecdh_public_key
 
-    if not all([username, password, device_id]):
-        return jsonify({'error': 'Missing required fields'}), 400
-
-    user = User.query.filter_by(username=username).first()
+    user = db.query(User).filter_by(username=username).first()
     if not user or not verify_password(password, user.password_hash):
-        _audit('login_fail', detail={'username': username})
-        return jsonify({'error': 'Invalid username or password'}), 401
+        _audit(db, 'login_fail', request, detail={'username': username})
+        raise HTTPException(status_code=401, detail='Invalid username or password')
 
-    # (email verification disabled — all accounts are auto-verified on register)
+    # Reject unverified accounts
+    if not user.is_email_verified:
+        raise HTTPException(
+            status_code=403,
+            detail='Email not verified. Please check your inbox or request a new link.',
+            headers={'X-Error-Code': 'email_not_verified'},
+        )
 
-    # Rehash if needed
+    # Rehash if params changed
     if needs_rehash(user.password_hash):
         user.password_hash = hash_password(password)
-        db.session.commit()
+        db.commit()
 
-    # Check if device already authorized
-    existing_device = DeviceKey.query.filter_by(user_id=user.id, device_id=device_id, is_active=True).first()
+    existing_device = db.query(DeviceKey).filter_by(
+        user_id=user.id, device_id=device_id, is_active=True
+    ).first()
 
     if existing_device:
         # Known device — issue JWT immediately
         existing_device.last_seen = datetime.utcnow()
-        # Update keys if provided (key refresh)
         if ecdsa_public_key:
             existing_device.ecdsa_public_key = ecdsa_public_key
         if ecdh_public_key:
             existing_device.ecdh_public_key = ecdh_public_key
-        db.session.commit()
+        db.commit()
 
         token = generate_jwt(user.id, device_id)
-        _audit('login_ok', user_id=user.id, detail={'device_id': device_id})
-        return jsonify({'status': 'ok', 'token': token, 'user': user.to_dict()}), 200
+        _audit(db, 'login_ok', request, user_id=user.id, detail={'device_id': device_id})
+        return {'status': 'ok', 'token': token, 'user': user.to_dict()}
 
     else:
-        # New device — require 2FA
+        # New device — require 2FA email
         if not ecdsa_public_key or not ecdh_public_key:
-            return jsonify({'error': 'Public keys required for new device registration'}), 400
+            raise HTTPException(
+                status_code=400,
+                detail='Public keys required for new device registration',
+            )
 
-        # Create pending device (inactive until 2FA approved)
         new_device = DeviceKey(
             user_id=user.id,
             device_id=device_id,
@@ -253,10 +325,9 @@ def login():
             device_name=device_name,
             is_active=False,
         )
-        db.session.add(new_device)
+        db.add(new_device)
 
-        # 2FA token
-        exp = datetime.utcnow() + current_app.config['VERIFICATION_TOKEN_EXPIRY']
+        exp = datetime.utcnow() + settings.VERIFICATION_TOKEN_EXPIRY
         ev = EmailVerification(
             user_id=user.id,
             token=generate_secure_token(),
@@ -264,121 +335,113 @@ def login():
             device_id=device_id,
             expires_at=exp,
         )
-        db.session.add(ev)
-        db.session.commit()
+        db.add(ev)
+        db.commit()
 
         send_2fa_email(user, device_name, ev.token)
-
-        return jsonify({
+        return {
             'status':    '2fa_required',
             'device_id': device_id,
             'message':   'Check your email to authorize this device.',
-        }), 202
+        }, 202
 
 
-# ── 2FA device authorization (email link click) ───────────────────
+# ── 2FA Device Authorization (link click) ─────────────────────────
 
-@auth_bp.route('/2fa-verify', methods=['GET'])
-def two_factor_verify():
-    token = request.args.get('token', '')
-    ev = EmailVerification.query.filter_by(
+@router.get('/2fa-verify')
+def two_factor_verify(token: str = '', db: Session = Depends(get_db)):
+    ev = db.query(EmailVerification).filter_by(
         token=token, verification_type='2fa_login', is_used=False
     ).first()
 
     if not ev or ev.is_expired():
-        return redirect('/?error=invalid_or_expired_2fa')
+        return RedirectResponse(url='/?error=invalid_or_expired_2fa')
 
-    device = DeviceKey.query.filter_by(
+    device = db.query(DeviceKey).filter_by(
         user_id=ev.user_id, device_id=ev.device_id
     ).first()
-
     if not device:
-        return redirect('/?error=device_not_found')
+        return RedirectResponse(url='/?error=device_not_found')
 
     device.is_active = True
     device.last_seen = datetime.utcnow()
     ev.is_used = True
-    db.session.commit()
-    _audit('device_add', user_id=ev.user_id, detail={'device_id': ev.device_id})
-    return redirect(f'/device-authorized?device={device.device_name}')
+    db.commit()
+    return RedirectResponse(url=f'/device-authorized?device={device.device_name}')
 
 
-# ── 2FA status polling ────────────────────────────────────────────
+# ── 2FA Status Polling ─────────────────────────────────────────────
 
-@auth_bp.route('/2fa-status', methods=['GET'])
-def two_factor_status():
-    """Original login tab polls this until device is authorized."""
-    device_id = request.args.get('device_id', '')
+@router.get('/2fa-status')
+def two_factor_status(device_id: str = '', db: Session = Depends(get_db)):
     if not device_id:
-        return jsonify({'error': 'device_id required'}), 400
+        raise HTTPException(status_code=400, detail='device_id required')
 
-    device = DeviceKey.query.filter_by(device_id=device_id, is_active=True).first()
+    device = db.query(DeviceKey).filter_by(device_id=device_id, is_active=True).first()
     if not device:
-        return jsonify({'status': 'pending'}), 200
+        return {'status': 'pending'}
 
     token = generate_jwt(device.user_id, device_id)
-    user  = User.query.get(device.user_id)
-    return jsonify({'status': 'authorized', 'token': token, 'user': user.to_dict()}), 200
+    user  = db.get(User, device.user_id)
+    return {'status': 'authorized', 'token': token, 'user': user.to_dict()}
 
 
-# ── Me / Settings / Devices ──────────────────────────────────────
+# ── Me / Settings / Devices ───────────────────────────────────────
 
-@auth_bp.route('/me', methods=['GET'])
-@token_required
-def me(current_user, current_device):
-    return jsonify({'user': current_user.to_dict()}), 200
-
-
-@auth_bp.route('/settings', methods=['PUT'])
-@token_required
-def update_settings(current_user, current_device):
-    data = request.get_json(silent=True) or {}
-    settings = current_user.get_settings()
-    if 'store_history' in data:
-        settings['store_history'] = bool(data['store_history'])
-    if 'session_mode' in data:
-        settings['session_mode'] = bool(data['session_mode'])
-    current_user.set_settings(settings)
-    db.session.commit()
-    return jsonify({'settings': settings}), 200
+@router.get('/me')
+def me(auth=Depends(get_current_user_and_device)):
+    user, _ = auth
+    return {'user': user.to_dict()}
 
 
-@auth_bp.route('/devices', methods=['GET'])
-@token_required
-def list_devices(current_user, current_device):
-    devices = DeviceKey.query.filter_by(user_id=current_user.id, is_active=True).all()
-    return jsonify({'devices': [d.to_dict() for d in devices]}), 200
+@router.put('/settings')
+def update_settings(body: SettingsBody, auth=Depends(get_current_user_and_device),
+                    db: Session = Depends(get_db)):
+    user, _ = auth
+    s = user.get_settings()
+    if body.store_history is not None:
+        s['store_history'] = body.store_history
+    if body.session_mode is not None:
+        s['session_mode'] = body.session_mode
+    user.set_settings(s)
+    db.commit()
+    return {'settings': s}
 
 
-@auth_bp.route('/devices/<string:dev_id>', methods=['DELETE'])
-@token_required
-def revoke_device(current_user, current_device, dev_id):
-    device = DeviceKey.query.filter_by(
-        user_id=current_user.id, device_id=dev_id
-    ).first_or_404()
+@router.get('/devices')
+def list_devices(auth=Depends(get_current_user_and_device), db: Session = Depends(get_db)):
+    user, _ = auth
+    devices = db.query(DeviceKey).filter_by(user_id=user.id, is_active=True).all()
+    return {'devices': [d.to_dict() for d in devices]}
+
+
+@router.delete('/devices/{dev_id}')
+def revoke_device(dev_id: str, auth=Depends(get_current_user_and_device),
+                  db: Session = Depends(get_db)):
+    user, _ = auth
+    device = db.query(DeviceKey).filter_by(user_id=user.id, device_id=dev_id).first()
+    if not device:
+        raise HTTPException(status_code=404, detail='Device not found')
     device.is_active = False
-    db.session.commit()
-    return jsonify({'message': 'Device revoked'}), 200
+    db.commit()
+    return {'message': 'Device revoked'}
 
 
-@auth_bp.route('/logout', methods=['POST'])
-@token_required
-def logout(current_user, current_device):
-    current_device.is_active = False
-    db.session.commit()
-    return jsonify({'message': 'Logged out successfully'}), 200
+@router.post('/logout')
+def logout(auth=Depends(get_current_user_and_device), db: Session = Depends(get_db)):
+    user, device = auth
+    device.is_active = False
+    db.commit()
+    return {'message': 'Logged out successfully'}
 
 
-# ── Dev-only: view suppressed email links ────────────────────────
-# Only active when MAIL_SUPPRESS_SEND=true. Returns last 10 links
-# so you don't have to hunt through the terminal.
+# ── Dev-only: view suppressed email links ─────────────────────────
 
-@auth_bp.route('/dev-links', methods=['GET'])
+@router.get('/dev-links')
 def dev_links():
-    if not current_app.config.get('MAIL_SUPPRESS_SEND', True):
-        return jsonify({'error': 'Not available in production'}), 403
-    from app.email_utils import _dev_link_buffer
-    return jsonify({
-        'note': 'These are suppressed emails (dev mode). Copy the link and open it in your browser.',
+    if not settings.MAIL_SUPPRESS_SEND:
+        raise HTTPException(status_code=403, detail='Not available in production')
+    return {
+        'note': 'Suppressed emails (dev mode). Copy the link and open it in your browser.',
         'links': list(reversed(_dev_link_buffer)),  # newest first
-    }), 200
+    }

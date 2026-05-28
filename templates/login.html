@@ -1,78 +1,94 @@
-{% extends "base.html" %}
-{% block title %}Sign In — SecureIM{% endblock %}
-{% block description %}Sign in to your SecureIM encrypted messaging account{% endblock %}
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Sign In — SecureIM</title>
+  <meta name="description" content="Sign in to SecureIM, the zero-trust end-to-end encrypted messaging platform.">
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="/static/css/style.css">
+</head>
+<body>
+<div class="mesh-bg"></div>
+<div class="auth-page">
+  <div class="auth-card glass-card">
 
-{% block body %}
-<main class="auth-page">
-  <div class="auth-card">
     <div class="auth-logo">
-      <div class="logo-icon">🔒</div>
-      <span class="logo-text">SecureIM</span>
+      <div class="auth-logo-icon">🔒</div>
+      <div class="auth-logo-text">Secure<span>IM</span></div>
     </div>
 
-    <h1 class="auth-title">Welcome back</h1>
-    <p class="auth-subtitle">Sign in to your encrypted account</p>
+    <!-- ── Login Form ───────────────────────────────────── -->
+    <div id="login-form-wrap">
+      <h1 class="auth-title">Welcome back</h1>
+      <p class="auth-subtitle">Sign in to your encrypted account</p>
 
-    <form id="login-form" novalidate>
-      <div class="form-group">
-        <label for="login-username">Username</label>
-        <input id="login-username" class="form-control" type="text"
-               placeholder="Enter your username" autocomplete="username" required>
-      </div>
-      <div class="form-group">
-        <label for="login-password">Password</label>
-        <input id="login-password" class="form-control" type="password"
-               placeholder="Enter your password" autocomplete="current-password" required>
-      </div>
-      <button id="login-btn" type="submit" class="btn btn-primary">Sign In</button>
-    </form>
+      <form id="login-form" autocomplete="off" novalidate>
+        <div class="field">
+          <label for="login-username">Username</label>
+          <input type="text" id="login-username" placeholder="your_username" autocomplete="username" required>
+        </div>
+        <div class="field">
+          <label for="login-password">Password</label>
+          <input type="password" id="login-password" placeholder="••••••••" autocomplete="current-password" required>
+        </div>
 
-    <!-- 2FA Waiting Screen -->
-    <div id="2fa-waiting">
-      <div class="pulse-icon">📧</div>
-      <h2 style="font-size:18px;">Check your email</h2>
-      <p style="color:var(--text-muted);font-size:14px;">
+        <div id="login-status" class="status-msg"></div>
+
+        <button type="submit" id="login-btn" class="btn btn-primary btn-mt">
+          <span class="spinner"></span>
+          <span class="btn-text">Sign In</span>
+        </button>
+      </form>
+
+      <!-- Resend verification — shown when email_not_verified error -->
+      <div id="resend-section" class="resend-section">
+        <p>📧 <strong>Haven't received your verification email?</strong><br>
+           Enter your email address to receive a new confirmation link.</p>
+        <form id="resend-form" novalidate>
+          <div class="field" style="margin-bottom:10px">
+            <input type="email" id="resend-email" placeholder="your@email.com" required>
+          </div>
+          <div id="resend-status" class="status-msg"></div>
+          <button type="submit" id="resend-btn" class="btn btn-secondary btn-sm">
+            <span class="btn-text">Resend Verification Email</span>
+          </button>
+        </form>
+      </div>
+
+      <!-- Dev links button -->
+      <div style="margin-top:14px; text-align:center;">
+        <button id="dev-links-btn" class="btn btn-ghost btn-sm"
+                style="display:none; width:auto; padding:6px 14px; font-size:12px;">
+          🛠️ Dev Email Links
+        </button>
+      </div>
+
+      <div class="auth-footer">
+        Don't have an account? <a href="/register">Create one</a>
+      </div>
+    </div>
+
+    <!-- ── 2FA Waiting ───────────────────────────────────── -->
+    <div id="two-fa-waiting" style="display:none; text-align:center;">
+      <div class="waiting-icon">📧</div>
+      <div class="waiting-title">Check your email</div>
+      <p class="waiting-sub">
         A device authorization link has been sent to your email.<br>
         Click the link to complete sign in.
       </p>
-      <button id="cancel-2fa-btn" class="btn btn-ghost" style="width:auto;">Cancel</button>
+      <button id="cancel-2fa-btn" class="btn btn-ghost btn-sm" style="width:auto; margin: 0 auto;">
+        Cancel
+      </button>
     </div>
 
-    <div id="login-status" class="status-msg"></div>
-
-    <!-- Resend Verification Section (shown when email not verified) -->
-    <div id="resend-verification" style="display:none; flex-direction:column; gap:12px; margin-top:16px;
-         background:rgba(251,191,36,0.08); border:1px solid rgba(251,191,36,0.3); border-radius:12px; padding:20px;">
-      <h3 style="margin:0; font-size:15px; color:#fbbf24;">📬 Haven't received your verification email?</h3>
-      <p style="margin:0; font-size:13px; color:var(--text-muted);">
-        Enter your email address to receive a new verification link.
-      </p>
-      <form id="resend-verification-form" novalidate style="display:flex; flex-direction:column; gap:10px;">
-        <input id="resend-email" class="form-control" type="email"
-               placeholder="your@email.com" autocomplete="email" required
-               style="margin-bottom:0;">
-        <button id="resend-btn" type="submit" class="btn btn-primary"
-                style="background:linear-gradient(135deg,#d97706,#b45309); width:auto; padding:10px 20px;">
-          Resend Verification Email
-        </button>
-      </form>
-      <div id="resend-status" class="status-msg" style="margin:0;"></div>
-    </div>
-
-    <div class="auth-footer" style="display:flex; align-items:center; justify-content:space-between; flex-wrap:wrap; gap:8px;">
-      <span>Don't have an account? <a href="/register">Create one</a></span>
-      <button id="dev-links-btn" title="View suppressed dev emails" style="
-        background: transparent; border: 1px dashed #334155; color: #475569;
-        padding: 4px 10px; border-radius: 6px; cursor: pointer; font-size: 11px;
-        display: flex; align-items: center; gap: 5px;
-      ">🛠️ Dev Emails</button>
-    </div>
   </div>
-</main>
-{% endblock %}
+</div>
 
-{% block scripts %}
 <script src="/static/js/crypto.js"></script>
 <script src="/static/js/storage.js"></script>
 <script src="/static/js/auth.js"></script>
-{% endblock %}
+</body>
+</html>

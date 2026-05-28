@@ -1,187 +1,169 @@
-{% extends "base.html" %}
-{% block title %}Chat — SecureIM{% endblock %}
-{% block description %}SecureIM end-to-end encrypted real-time chat{% endblock %}
+<!DOCTYPE html>
+<html lang="en" data-theme="dark">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>SecureIM — Encrypted Chat</title>
+  <meta name="description" content="SecureIM end-to-end encrypted messaging.">
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="/static/css/style.css">
+</head>
+<body>
 
-{% block body %}
-<!-- Password Unlock Overlay -->
+<!-- ── Unlock Overlay (password gate) ──────────────────────── -->
 <div id="unlock-overlay">
   <div class="unlock-card">
-    <div class="unlock-icon">🔐</div>
-    <h2 style="margin-bottom:8px;">Unlock Your Keys</h2>
-    <p style="color:var(--text-muted);font-size:14px;margin-bottom:20px;">
-      Enter your password to decrypt your local identity keys
+    <div class="auth-logo" style="margin-bottom:24px">
+      <div class="auth-logo-icon">🔒</div>
+      <div class="auth-logo-text">Secure<span>IM</span></div>
+    </div>
+    <h2 style="font-size:18px; margin-bottom:8px; font-weight:700;">Unlock your keys</h2>
+    <p style="color:var(--text-2); font-size:13px; margin-bottom:20px; line-height:1.6;">
+      Enter your password to decrypt your private keys and start the session.
     </p>
-    <input id="unlock-password" class="form-control" type="password"
-           placeholder="Your password" autocomplete="current-password"
-           style="margin-bottom:12px;" onkeydown="if(event.key==='Enter')document.getElementById('unlock-btn').click()">
-    <button id="unlock-btn" class="btn btn-primary">Unlock</button>
+    <div class="field">
+      <label for="unlock-password">Password</label>
+      <input type="password" id="unlock-password" placeholder="Your account password" autocomplete="current-password">
+    </div>
+    <button id="unlock-btn" class="btn btn-primary btn-mt">
+      <span class="btn-text">🔓 Unlock &amp; Enter</span>
+    </button>
   </div>
 </div>
 
-<!-- Group Creation Modal -->
-<div id="group-modal" class="modal-overlay">
-  <div class="modal-card">
-    <h2 class="modal-title">➕ Create Group</h2>
-    <div class="form-group">
-      <label>Group Name</label>
-      <input id="new-group-name" class="form-control" type="text" placeholder="e.g. Team Alpha">
-    </div>
-    <div class="form-group">
-      <label>Select Members</label>
-      <div id="member-list" style="max-height:200px;overflow-y:auto;"></div>
-    </div>
-    <div style="display:flex;gap:10px;margin-top:16px;">
-      <button id="create-group-btn" class="btn btn-primary" style="flex:1;">Create</button>
-      <button class="btn btn-ghost" onclick="closeModal('group-modal')" style="flex:0 0 auto;width:auto;">Cancel</button>
-    </div>
-  </div>
-</div>
+<!-- ── Main Chat Layout ─────────────────────────────────────── -->
+<div class="chat-layout">
 
-<!-- Alert Toast -->
-<div id="chat-alert" class="chat-alert"></div>
-
-<!-- Main Chat App -->
-<div class="chat-app">
-
-  <!-- ── Sidebar ── -->
+  <!-- LEFT SIDEBAR -->
   <aside class="sidebar">
     <div class="sidebar-header">
-      <span class="sidebar-logo">🔒 SecureIM</span>
-      <div style="display:flex;gap:6px;">
-        <button id="theme-btn" class="btn btn-ghost"
-                style="padding:6px 10px;font-size:14px;width:auto;" title="Toggle theme">🌙</button>
-        <button id="logout-btn" class="btn btn-ghost"
-                style="padding:6px 12px;font-size:12px;width:auto;">Logout</button>
+      <div class="sidebar-brand">
+        <div class="sidebar-brand-icon">🔒</div>
+        <span class="sidebar-brand-name">SecureIM</span>
+      </div>
+      <div class="sidebar-user">
+        <div class="sidebar-user-avatar" id="user-avatar-initials">?</div>
+        <span class="sidebar-user-name" id="current-username">…</span>
+        <div class="sidebar-user-actions">
+          <button class="icon-btn" id="theme-btn" title="Toggle theme">☀️</button>
+          <button class="icon-btn" id="logout-btn" title="Logout">⎋</button>
+        </div>
       </div>
     </div>
 
-    <div class="user-info">
-      <div class="user-avatar" id="user-avatar-letter">?</div>
-      <div>
-        <div class="user-name" id="current-username">Loading…</div>
-        <div style="font-size:11px;color:var(--success);">● Online</div>
-      </div>
-    </div>
-
-    <div class="sidebar-search">
-      <input id="search-input" type="search" placeholder="🔍 Search users…" autocomplete="off">
+    <!-- Search -->
+    <div class="search-wrap">
+      <input type="text" id="search-input" placeholder="Search contacts…" autocomplete="off">
     </div>
 
     <!-- Direct Messages -->
-    <div class="sidebar-section">
-      <span>Direct Messages</span>
+    <div class="section-label">
+      Direct Messages
     </div>
     <ul id="contacts-list" class="contacts-list"></ul>
 
     <!-- Groups -->
-    <div class="sidebar-section">
-      <span>Groups</span>
-      <button title="New group" onclick="openGroupModal()">＋</button>
+    <div class="section-label">
+      Groups
+      <button id="open-group-modal-btn" title="New group">＋</button>
     </div>
     <ul id="groups-list" class="contacts-list"></ul>
 
-    <!-- Settings -->
-    <div class="settings-panel">
-      <div class="sidebar-section" style="padding:0 0 8px;">
-        <span>Privacy Settings</span>
-      </div>
-      <div class="toggle-row">
-        <span class="toggle-label" title="Save encrypted chat history to local storage">Store History</span>
+    <!-- Settings footer -->
+    <div class="sidebar-footer">
+      <div class="settings-toggle">
+        <span>💾 Save message history</span>
         <label class="toggle-switch">
           <input type="checkbox" id="toggle-store-history" checked>
-          <span class="toggle-track"></span>
+          <span class="toggle-thumb"></span>
         </label>
       </div>
-      <div class="toggle-row">
-        <span class="toggle-label" title="Current session messages lost on refresh. Older history kept.">Session Mode</span>
+      <div class="settings-toggle">
+        <span>🔄 Ephemeral session mode</span>
         <label class="toggle-switch">
           <input type="checkbox" id="toggle-session-mode">
-          <span class="toggle-track"></span>
+          <span class="toggle-thumb"></span>
         </label>
       </div>
     </div>
   </aside>
 
-  <!-- ── Chat Area ── -->
-  <div style="flex:1;display:flex;flex-direction:column;overflow:hidden;">
+  <!-- MAIN AREA -->
+  <div class="chat-main" id="chat-main-wrapper">
 
     <!-- No conversation selected -->
-    <div id="no-chat-placeholder" class="no-chat-placeholder" style="display:flex;">
-      <div class="big-icon">🔒</div>
-      <p>Select a contact or group to start chatting</p>
-      <p style="font-size:14px;color:var(--text-muted);">All messages are end-to-end encrypted</p>
+    <div class="no-chat-placeholder" id="no-chat-placeholder">
+      <div class="placeholder-icon">🔒</div>
+      <h3>End-to-End Encrypted</h3>
+      <p>Select a contact to start a secure conversation.<br>Keys never leave your device.</p>
     </div>
 
     <!-- Active conversation -->
-    <div id="chat-main" class="chat-main" style="display:none;">
-
+    <div id="chat-main" style="display:none; flex:1; flex-direction:column; overflow:hidden;">
+      <!-- Connection banner -->
       <div id="conn-banner"></div>
 
-      <header class="chat-header">
-        <div>
-          <div id="chat-header-name" class="chat-header-name">—</div>
-          <div id="typing-indicator">typing…</div>
+      <!-- Header -->
+      <div class="chat-header">
+        <div class="chat-header-avatar" id="chat-header-avatar">?</div>
+        <div class="chat-header-info">
+          <div class="chat-header-name" id="chat-header-name">Select a contact</div>
+          <div class="chat-header-status" id="chat-header-status"></div>
         </div>
-        <span id="enc-status-badge" class="enc-badge pending">⏳ Establishing…</span>
-        <button class="btn btn-ghost"
-                style="padding:6px 10px;font-size:12px;width:auto;"
-                onclick="verifyActiveContact()">Verify Keys</button>
-      </header>
+        <div id="enc-status-badge" class="enc-badge pending">⏳ Establishing…</div>
+      </div>
 
-      <div id="messages-container" class="messages-container"></div>
+      <!-- Messages -->
+      <div id="messages-container"></div>
 
-      <div class="input-area">
-        <select id="timer-select" title="Self-destruct timer">
-          <option value="0">⏱️ Off</option>
+      <!-- Typing indicator -->
+      <div id="typing-indicator">✏️ typing…</div>
+
+      <!-- Input bar -->
+      <div class="chat-input-bar">
+        <div class="input-wrap">
+          <textarea id="message-input" placeholder="Send an encrypted message…" rows="1"></textarea>
+        </div>
+        <select id="timer-select" class="timer-select" title="Self-destruct timer">
+          <option value="0">No timer</option>
+          <option value="60">1 min</option>
           <option value="300">5 min</option>
           <option value="3600">1 hr</option>
           <option value="86400">24 hr</option>
-          <option value="604800">7 days</option>
         </select>
-        <textarea id="message-input" placeholder="Type a message… (Enter to send)"
-                  rows="1" autocomplete="off"></textarea>
-        <button id="send-btn" title="Send message">➤</button>
+        <button id="send-btn" class="send-btn" title="Send message">➤</button>
       </div>
     </div>
   </div>
 </div>
-{% endblock %}
 
-{% block scripts %}
-<script src="https://cdn.socket.io/4.7.5/socket.io.min.js"></script>
+<!-- ── Alert Toast ───────────────────────────────────────────── -->
+<div id="chat-alert"></div>
+
+<!-- ── Group Modal ───────────────────────────────────────────── -->
+<div class="modal-overlay" id="group-modal">
+  <div class="modal-box">
+    <div class="modal-header">
+      <span class="modal-title">Create Group</span>
+      <button class="modal-close" onclick="closeModal('group-modal')">✕</button>
+    </div>
+    <div class="field">
+      <label for="new-group-name">Group Name</label>
+      <input type="text" id="new-group-name" placeholder="e.g. Team Alpha">
+    </div>
+    <div class="section-label" style="padding:10px 0 6px;">Add Members</div>
+    <div class="member-list" id="member-list"></div>
+    <button id="create-group-btn" class="btn btn-primary" style="margin-top:16px;">
+      <span class="btn-text">Create Group</span>
+    </button>
+  </div>
+</div>
+
+<script src="/static/js/socket.io.min.js"></script>
 <script src="/static/js/crypto.js"></script>
 <script src="/static/js/storage.js"></script>
 <script src="/static/js/chat.js"></script>
-<script>
-  function openGroupModal() {
-    // Populate member list from current contacts
-    const list = document.getElementById('member-list');
-    list.innerHTML = '';
-    document.querySelectorAll('#contacts-list .contact-item').forEach(li => {
-      const uid  = li.dataset.userId;
-      const name = li.querySelector('.contact-name')?.textContent || '';
-      if (!uid) return;
-      const label = document.createElement('label');
-      label.style.cssText = 'display:flex;align-items:center;gap:8px;padding:6px;cursor:pointer;';
-      label.innerHTML = `<input type="checkbox" class="member-check" value="${uid}">
-                         <span>${name}</span>`;
-      list.appendChild(label);
-    });
-    document.getElementById('group-modal').classList.add('open');
-  }
-
-  function verifyActiveContact() {
-    if (!activeConversation || activeConversation.type !== 'dm') return;
-    verifyContact(activeConversation.id, activeConversation.username);
-  }
-
-  // Update avatar letter when user loads
-  document.addEventListener('DOMContentLoaded', () => {
-    const user = SecureStorage.getUser();
-    if (user) {
-      const el = document.getElementById('user-avatar-letter');
-      if (el) el.textContent = user.username[0].toUpperCase();
-    }
-  });
-</script>
-{% endblock %}
+</body>
+</html>

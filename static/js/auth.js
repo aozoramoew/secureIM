@@ -1,5 +1,6 @@
 /**
  * auth.js — Registration, Login, and 2FA UI Logic
+ * Updated for FastAPI backend + real email verification flow.
  */
 
 const API = '/api/auth';
@@ -36,11 +37,32 @@ function setStatus(elementId, message, type = 'info') {
   el.style.display = message ? 'block' : 'none';
 }
 
-function setLoading(btnId, loading, defaultText = 'Submit') {
+function setBtnLoading(btnId, loading, defaultText = 'Submit') {
   const btn = document.getElementById(btnId);
   if (!btn) return;
   btn.disabled = loading;
-  btn.textContent = loading ? 'Please wait…' : defaultText;
+  const spinner = btn.querySelector('.spinner');
+  const text    = btn.querySelector('.btn-text');
+  if (spinner) spinner.style.display = loading ? 'block' : 'none';
+  if (text)    text.textContent = loading ? 'Please wait…' : defaultText;
+  if (loading) btn.classList.add('loading');
+  else btn.classList.remove('loading');
+}
+
+// Password strength
+function updateStrengthBar(password) {
+  const bar = document.getElementById('strength-bar');
+  if (!bar) return;
+  let score = 0;
+  if (password.length >= 8)  score++;
+  if (password.length >= 12) score++;
+  if (/[A-Z]/.test(password)) score++;
+  if (/[0-9]/.test(password)) score++;
+  if (/[^A-Za-z0-9]/.test(password)) score++;
+  const pct = (score / 5) * 100;
+  const colors = ['#ef4444','#f97316','#eab308','#22c55e','#00d4ff'];
+  bar.style.width  = pct + '%';
+  bar.style.background = colors[score - 1] || '#334155';
 }
 
 // ── Registration ────────────────────────────────────────────────
@@ -59,18 +81,18 @@ async function handleRegister(e) {
     return setStatus('reg-status', 'Password must be at least 8 characters.', 'error');
   }
 
-  setLoading('reg-btn', true, 'Create Account');
-  setStatus('reg-status', '🔑 Generating your cryptographic identity keys…', 'info');
+  setBtnLoading('reg-btn', true, 'Create Account');
+  setStatus('reg-status', '🔑 Generating cryptographic identity keys…', 'info');
 
   try {
     // 1. Generate identity key pairs on-device
     const identityKP  = await SecureCrypto.generateIdentityKeyPair();   // ECDSA P-384
-    const ecdhKP      = await SecureCrypto.generateEphemeralKeyPair();   // ECDH P-256 (static)
+    const ecdhKP      = await SecureCrypto.generateEphemeralKeyPair();   // ECDH P-256
 
-    const ecdsaPubJwk = await SecureCrypto.exportKeyJWK(identityKP.publicKey);
-    const ecdhPubJwk  = await SecureCrypto.exportKeyJWK(ecdhKP.publicKey);
-    const ecdsaPrivJwk= await SecureCrypto.exportKeyJWK(identityKP.privateKey);
-    const ecdhPrivJwk = await SecureCrypto.exportKeyJWK(ecdhKP.privateKey);
+    const ecdsaPubJwk  = await SecureCrypto.exportKeyJWK(identityKP.publicKey);
+    const ecdhPubJwk   = await SecureCrypto.exportKeyJWK(ecdhKP.publicKey);
+    const ecdsaPrivJwk = await SecureCrypto.exportKeyJWK(identityKP.privateKey);
+    const ecdhPrivJwk  = await SecureCrypto.exportKeyJWK(ecdhKP.privateKey);
 
     const deviceId   = getOrCreateDeviceId();
     const deviceName = getDeviceName();
@@ -87,9 +109,7 @@ async function handleRegister(e) {
       method:  'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
-        username,
-        email,
-        password,
+        username, email, password,
         ecdsa_public_key: ecdsaPubJwk,
         ecdh_public_key:  ecdhPubJwk,
         device_id:        deviceId,
@@ -97,35 +117,49 @@ async function handleRegister(e) {
       }),
     });
 
-    // Safe JSON parse — server might return HTML on crash
     let data = {};
-    const contentType = res.headers.get('content-type') || '';
-    if (contentType.includes('application/json')) {
+    const ct = res.headers.get('content-type') || '';
+    if (ct.includes('application/json')) {
       data = await res.json();
     } else {
-      const text = await res.text();
-      throw new Error(`Server error (HTTP ${res.status}). Check Railway logs.`);
+      await res.text();
+      throw new Error(`Server error (HTTP ${res.status}). Check server logs.`);
     }
 
-    if (!res.ok) throw new Error(data.error || 'Registration failed');
+    if (!res.ok) {
+      throw new Error(data.detail || data.error || 'Registration failed');
+    }
 
-    // Registration successful — token returned immediately (no email verification)
-    if (data.token) {
-      SecureStorage.saveAuthToken(data.token);
-      SecureStorage.saveUser(data.user);
-      SecureStorage.saveSettings((data.user && data.user.settings) || {});
-      setStatus('reg-status', '✅ Account created! Entering SecureIM…', 'success');
-      setTimeout(() => { window.location.href = '/chat'; }, 1200);
+    // ── Email verification required ────────────────────────────
+    // Server returns {status:'verification_sent', email:'...'}
+    // Show "check your email" panel on THIS page (register.html)
+    if (data.status === 'verification_sent') {
+      showEmailCheckPanel(data.email || email);
+      // In dev mode, auto-show the dev link modal
+      await checkAndShowDevLink('reg-status');
     } else {
-      setStatus('reg-status', '✅ ' + (data.message || 'Registration successful!'), 'success');
-      setTimeout(() => { window.location.href = '/login'; }, 2000);
+      setStatus('reg-status', '✅ ' + (data.message || 'Done!'), 'success');
     }
 
   } catch (err) {
     setStatus('reg-status', '❌ ' + err.message, 'error');
   } finally {
-    setLoading('reg-btn', false, 'Create Account');
+    setBtnLoading('reg-btn', false, 'Create Account');
   }
+}
+
+function showEmailCheckPanel(email) {
+  const formWrap = document.getElementById('register-form-wrap');
+  const panel    = document.getElementById('email-check-panel');
+  const emailDisplay = document.getElementById('reg-email-display');
+
+  if (formWrap) formWrap.style.display = 'none';
+  if (panel)    panel.style.display    = 'block';
+  if (emailDisplay) emailDisplay.textContent = email;
+
+  // Pre-fill resend email input
+  const resendInput = document.getElementById('resend-email');
+  if (resendInput) resendInput.value = email;
 }
 
 // ── Login ────────────────────────────────────────────────────────
@@ -137,60 +171,47 @@ async function handleLogin(e) {
   const username = document.getElementById('login-username').value.trim();
   const password = document.getElementById('login-password').value;
 
-  setLoading('login-btn', true, 'Sign In');
+  setBtnLoading('login-btn', true, 'Sign In');
   setStatus('login-status', '🔑 Loading your identity keys…', 'info');
 
   try {
     let ecdsaPubJwk = null;
     let ecdhPubJwk  = null;
-    const hasKeys = SecureStorage.hasIdentityKeys();
+    const hasKeys   = SecureStorage.hasIdentityKeys();
 
     if (hasKeys) {
-      // Decrypt stored private keys and re-derive public keys
       const keys = await SecureStorage.loadIdentityKeys(password);
       if (!keys) {
         throw new Error('Wrong password or keys not found on this device.');
       }
-
-      // Import private keys and re-export the public JWK from them
       try {
         const ecdsaPrivKey = await crypto.subtle.importKey(
           'jwk', JSON.parse(keys.ecdsaPrivJwk),
-          { name: 'ECDSA', namedCurve: 'P-384' },
-          true, ['sign']
+          { name: 'ECDSA', namedCurve: 'P-384' }, true, ['sign']
         );
         const ecdhPrivKey = await crypto.subtle.importKey(
           'jwk', JSON.parse(keys.ecdhPrivJwk),
-          { name: 'ECDH', namedCurve: 'P-256' },
-          true, ['deriveKey', 'deriveBits']
+          { name: 'ECDH', namedCurve: 'P-256' }, true, ['deriveKey', 'deriveBits']
         );
-
-        // Extract public key from private key
         const ecdsaPubKey = await crypto.subtle.exportKey('jwk', ecdsaPrivKey);
         const ecdhPubKey  = await crypto.subtle.exportKey('jwk', ecdhPrivKey);
 
-        // Build public-only JWK (remove private 'd' field)
         const ecdsaPubOnly = { ...ecdsaPubKey };
-        delete ecdsaPubOnly.d;
-        delete ecdsaPubOnly.key_ops;
+        delete ecdsaPubOnly.d; delete ecdsaPubOnly.key_ops;
         ecdsaPubOnly.key_ops = ['verify'];
 
         const ecdhPubOnly = { ...ecdhPubKey };
-        delete ecdhPubOnly.d;
-        delete ecdhPubOnly.key_ops;
+        delete ecdhPubOnly.d; delete ecdhPubOnly.key_ops;
         ecdhPubOnly.key_ops = [];
 
         ecdsaPubJwk = JSON.stringify(ecdsaPubOnly);
         ecdhPubJwk  = JSON.stringify(ecdhPubOnly);
       } catch (keyErr) {
-        // If key extraction fails, regenerate keys for this device
         console.warn('Key extraction failed, regenerating:', keyErr);
-        ecdsaPubJwk = null;
-        ecdhPubJwk  = null;
+        ecdsaPubJwk = null; ecdhPubJwk = null;
       }
     }
 
-    // If this is a fresh device (no stored keys), generate new ones
     if (!hasKeys || (!ecdsaPubJwk && !ecdhPubJwk)) {
       setStatus('login-status', '🔑 Generating device keys for new device…', 'info');
       const identityKP = await SecureCrypto.generateIdentityKeyPair();
@@ -212,22 +233,18 @@ async function handleLogin(e) {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
-        username, password,
-        device_id:        deviceId,
-        device_name:      deviceName,
-        ecdsa_public_key: ecdsaPubJwk,
-        ecdh_public_key:  ecdhPubJwk,
+        username, password, device_id: deviceId, device_name: deviceName,
+        ecdsa_public_key: ecdsaPubJwk, ecdh_public_key: ecdhPubJwk,
       }),
     });
 
-    // Safe JSON parse — avoid crash if server returns HTML error page
     let data = {};
-    const contentType = res.headers.get('content-type') || '';
-    if (contentType.includes('application/json')) {
+    const ct = res.headers.get('content-type') || '';
+    if (ct.includes('application/json')) {
       data = await res.json();
     } else {
-      const text = await res.text();
-      throw new Error(`Server error (HTTP ${res.status}). Check Railway logs.`);
+      await res.text();
+      throw new Error(`Server error (HTTP ${res.status}). Check server logs.`);
     }
 
     if (res.status === 200 && data.status === 'ok') {
@@ -237,28 +254,39 @@ async function handleLogin(e) {
       SecureStorage.saveSettings(data.user.settings || {});
       window.location.href = '/chat';
 
-    } else if (res.status === 202 && data.status === '2fa_required') {
-      // New device — show 2FA waiting screen
+    } else if ((res.status === 202 || res.status === 200) && data.status === '2fa_required') {
+      // New device — show 2FA waiting screen + dev link if available
       show2FAWaiting(deviceId);
+      await checkAndShowDevLink('login-status');
+
+    } else if (res.status === 403) {
+      // Email not verified
+      const errorCode = res.headers.get('X-Error-Code') || '';
+      if (errorCode === 'email_not_verified' || (data.detail || '').toLowerCase().includes('not verified')) {
+        showResendSection();
+        setStatus('login-status',
+          '⚠️ Your email is not verified. Check your inbox or request a new link below.',
+          'warning');
+      } else {
+        throw new Error(data.detail || 'Access denied');
+      }
+      setBtnLoading('login-btn', false, 'Sign In');
 
     } else {
-      throw new Error(data.error || 'Login failed');
+      throw new Error(data.detail || data.error || 'Login failed');
     }
 
   } catch (err) {
     setStatus('login-status', '❌ ' + err.message, 'error');
-    setLoading('login-btn', false, 'Sign In');
+    setBtnLoading('login-btn', false, 'Sign In');
   }
 }
 
 function show2FAWaiting(deviceId) {
-  const form = document.getElementById('login-form');
-  if (form) form.style.display = 'none';
-
-  const waiting = document.getElementById('2fa-waiting');
-  if (waiting) waiting.style.display = 'flex';
-
-  setStatus('login-status', '📧 Check your email and click the authorization link.', 'info');
+  const formWrap = document.getElementById('login-form-wrap');
+  const waiting  = document.getElementById('two-fa-waiting');
+  if (formWrap) formWrap.style.display = 'none';
+  if (waiting)  waiting.style.display  = 'block';
 
   // Poll for authorization every 3 seconds
   _2faPollInterval = setInterval(async () => {
@@ -276,19 +304,22 @@ function show2FAWaiting(deviceId) {
   }, 3000);
 }
 
-// ── Resend Verification Email ────────────────────────────────────
-
-function showResendVerification(username) {
-  const resendSection = document.getElementById('resend-verification');
-  if (resendSection) {
-    resendSection.style.display = 'flex';
-    // Pre-fill with username hint
-    const emailInput = document.getElementById('resend-email');
-    if (emailInput) emailInput.focus();
-  }
-  setStatus('login-status', '⚠️ Your email is not verified yet. Please check your inbox or request a new link below.', 'error');
-  setLoading('login-btn', false, 'Sign In');
+function cancel2FA() {
+  if (_2faPollInterval) clearInterval(_2faPollInterval);
+  const formWrap = document.getElementById('login-form-wrap');
+  const waiting  = document.getElementById('two-fa-waiting');
+  if (formWrap) formWrap.style.display = 'block';
+  if (waiting)  waiting.style.display  = 'none';
+  setStatus('login-status', '', 'info');
+  setBtnLoading('login-btn', false, 'Sign In');
 }
+
+function showResendSection() {
+  const section = document.getElementById('resend-section');
+  if (section) section.classList.add('visible');
+}
+
+// ── Resend Verification Email ────────────────────────────────────
 
 async function handleResendVerification(e) {
   e.preventDefault();
@@ -298,7 +329,7 @@ async function handleResendVerification(e) {
   }
 
   const btn = document.getElementById('resend-btn');
-  if (btn) { btn.disabled = true; btn.textContent = 'Sending…'; }
+  if (btn) { btn.disabled = true; btn.querySelector('.btn-text').textContent = 'Sending…'; }
   setStatus('resend-status', '📡 Sending verification email…', 'info');
 
   try {
@@ -310,18 +341,20 @@ async function handleResendVerification(e) {
     const data = await res.json();
 
     if (!res.ok) {
-      setStatus('resend-status', '❌ ' + (data.error || 'Failed to send email'), 'error');
+      setStatus('resend-status', '❌ ' + (data.detail || data.error || 'Failed to send'), 'error');
     } else {
       setStatus('resend-status', '✅ ' + data.message, 'success');
-      // Show dev link if in dev mode
+      // In dev mode, auto-show the dev link modal
       await checkAndShowDevLink('resend-status');
-      if (btn) { btn.textContent = 'Sent!'; }
     }
-  } catch (err) {
+  } catch {
     setStatus('resend-status', '❌ Network error. Please try again.', 'error');
   } finally {
     setTimeout(() => {
-      if (btn) { btn.disabled = false; btn.textContent = 'Resend Email'; }
+      if (btn) {
+        btn.disabled = false;
+        btn.querySelector('.btn-text').textContent = 'Resend Verification Email';
+      }
     }, 5000);
   }
 }
@@ -330,168 +363,115 @@ async function handleResendVerification(e) {
 
 async function checkAndShowDevLink(nearElementId) {
   try {
-    const res  = await fetch(`${API}/dev-links`);
+    const res = await fetch(`${API}/dev-links`);
     if (!res.ok) return;  // Not in dev mode
     const data = await res.json();
     if (data.links && data.links.length > 0) {
-      const latest = data.links[0];
-      showDevEmailModal(latest);
+      showDevEmailModal(data.links[0]);
     }
   } catch { /* production — dev-links not available */ }
 }
 
 function showDevEmailModal(entry) {
-  // Remove existing modal if any
   const old = document.getElementById('dev-email-modal');
   if (old) old.remove();
 
   const modal = document.createElement('div');
   modal.id = 'dev-email-modal';
-  modal.style.cssText = `
-    position: fixed; top: 0; left: 0; right: 0; bottom: 0;
-    background: rgba(0,0,0,0.85); z-index: 9999;
-    display: flex; align-items: center; justify-content: center;
-    padding: 20px; box-sizing: border-box;
-  `;
+  modal.className = 'dev-modal-backdrop';
 
   modal.innerHTML = `
-    <div style="
-      background: #111827; border: 2px solid #00d4ff; border-radius: 16px;
-      padding: 32px; max-width: 560px; width: 100%; box-shadow: 0 0 40px rgba(0,212,255,0.3);
-      font-family: sans-serif; color: #e2e8f0; box-sizing: border-box;
-    ">
-      <div style="display:flex; align-items:center; gap:12px; margin-bottom:20px;">
-        <span style="font-size:28px;">🛠️</span>
+    <div class="dev-modal">
+      <div class="dev-modal-header">
+        <span style="font-size:24px;">🛠️</span>
         <div>
-          <h2 style="margin:0; color:#00d4ff; font-size:18px;">Dev Mode — Email Suppressed</h2>
-          <p style="margin:4px 0 0; color:#64748b; font-size:13px;">
+          <h2>Dev Mode — Email Suppressed</h2>
+          <p style="color:var(--text-3);font-size:12px;margin:2px 0 0;">
             MAIL_SUPPRESS_SEND=true · Email was not actually sent
           </p>
         </div>
       </div>
-      <div style="background:#0a0e1a; border-radius:8px; padding:16px; margin-bottom:16px;">
-        <p style="margin:0 0 4px; font-size:12px; color:#64748b;">To: <span style="color:#e2e8f0;">${entry.to}</span></p>
-        <p style="margin:0 0 12px; font-size:12px; color:#64748b;">Subject: <span style="color:#e2e8f0;">${entry.subject}</span></p>
-        <p style="margin:0 0 8px; font-size:12px; color:#94a3b8;">Click the link below to complete the action:</p>
-        <a href="${entry.link}" target="_blank" style="
-          display: block; word-break: break-all; font-size: 13px;
-          color: #00d4ff; text-decoration: underline; line-height: 1.5;
-        ">${entry.link}</a>
+      <div class="dev-link-box">
+        <p style="margin:0 0 4px;font-size:12px;color:var(--text-3);">To: <strong style="color:var(--text);">${entry.to}</strong></p>
+        <p style="margin:0 0 10px;font-size:12px;color:var(--text-3);">Subject: ${entry.subject}</p>
+        <p style="margin:0 0 8px;font-size:12px;color:var(--text-2);">Click the link to complete the action:</p>
+        <a href="${entry.link}" target="_blank">${entry.link}</a>
       </div>
-      <div style="display:flex; gap:12px; flex-wrap:wrap;">
-        <a href="${entry.link}" target="_blank" style="
-          display: inline-flex; align-items: center; gap: 8px;
-          padding: 10px 20px; background: #00d4ff; color: #0a0e1a;
-          border-radius: 8px; text-decoration: none; font-weight: 700; font-size: 14px;
-        ">✅ Open Link</a>
-        <button onclick="
-          navigator.clipboard.writeText('${entry.link}');
-          this.textContent = '✓ Copied!';
-          setTimeout(() => this.textContent = '📋 Copy Link', 1500);
-        " style="
-          padding: 10px 20px; background: #1e293b; color: #e2e8f0;
-          border: 1px solid #334155; border-radius: 8px; cursor: pointer;
-          font-size: 14px;
-        ">📋 Copy Link</button>
-        <button onclick="
-          fetch('/api/auth/dev-links').then(r => r.json()).then(d => showAllDevLinks(d.links));
-        " style="
-          padding: 10px 20px; background: #1e293b; color: #94a3b8;
-          border: 1px solid #334155; border-radius: 8px; cursor: pointer;
-          font-size: 14px;
-        ">📬 All Dev Links</button>
-        <button onclick="document.getElementById('dev-email-modal').remove();" style="
-          padding: 10px 20px; background: transparent; color: #64748b;
-          border: 1px solid #334155; border-radius: 8px; cursor: pointer;
-          font-size: 14px; margin-left: auto;
-        ">✕ Close</button>
+      <div class="dev-modal-actions">
+        <a href="${entry.link}" target="_blank" class="btn btn-primary btn-sm"
+           style="width:auto;text-decoration:none;">✅ Open Link</a>
+        <button id="dev-copy-btn" class="btn btn-secondary btn-sm" style="width:auto;"
+          onclick="navigator.clipboard.writeText('${entry.link}');this.textContent='✓ Copied!';setTimeout(()=>this.textContent='📋 Copy',1500);">
+          📋 Copy
+        </button>
+        <button class="btn btn-ghost btn-sm" style="width:auto;"
+          onclick="openDevLinks();">
+          📬 All links
+        </button>
+        <button class="btn btn-ghost btn-sm" style="width:auto; margin-left:auto;"
+          onclick="document.getElementById('dev-email-modal').remove();">
+          ✕ Close
+        </button>
       </div>
     </div>
   `;
 
-  modal.addEventListener('click', (e) => {
-    if (e.target === modal) modal.remove();
-  });
-
+  modal.addEventListener('click', (e) => { if (e.target === modal) modal.remove(); });
   document.body.appendChild(modal);
 }
-
-function showAllDevLinks(links) {
-  const old = document.getElementById('dev-email-modal');
-  if (old) old.remove();
-
-  const modal = document.createElement('div');
-  modal.id = 'dev-email-modal';
-  modal.style.cssText = `
-    position: fixed; top: 0; left: 0; right: 0; bottom: 0;
-    background: rgba(0,0,0,0.85); z-index: 9999;
-    display: flex; align-items: center; justify-content: center;
-    padding: 20px; box-sizing: border-box; overflow-y: auto;
-  `;
-
-  const rows = links.map((entry, i) => `
-    <div style="background:#0a0e1a; border-radius:8px; padding:16px; margin-bottom:12px;">
-      <div style="display:flex; justify-content:space-between; align-items:start; flex-wrap:wrap; gap:8px; margin-bottom:8px;">
-        <div>
-          <span style="font-size:11px; color:#64748b;">To: ${entry.to}</span><br>
-          <span style="font-size:11px; color:#64748b;">${entry.subject}</span>
-        </div>
-        <a href="${entry.link}" target="_blank" style="
-          padding: 6px 14px; background: #00d4ff; color: #0a0e1a;
-          border-radius: 6px; text-decoration: none; font-weight: 700; font-size: 12px; white-space: nowrap;
-        ">Open →</a>
-      </div>
-      <div style="font-size:12px; color:#00d4ff; word-break:break-all; line-height:1.5;">${entry.link}</div>
-    </div>
-  `).join('');
-
-  modal.innerHTML = `
-    <div style="
-      background: #111827; border: 2px solid #00d4ff; border-radius: 16px;
-      padding: 32px; max-width: 640px; width: 100%; box-shadow: 0 0 40px rgba(0,212,255,0.3);
-      font-family: sans-serif; color: #e2e8f0; box-sizing: border-box; max-height: 90vh; overflow-y: auto;
-    ">
-      <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:24px;">
-        <h2 style="margin:0; color:#00d4ff; font-size:18px;">🛠️ Dev Email Links (Last ${links.length})</h2>
-        <button onclick="document.getElementById('dev-email-modal').remove();" style="
-          background: transparent; border: 1px solid #334155; color: #64748b;
-          padding: 6px 12px; border-radius: 6px; cursor: pointer; font-size: 13px;
-        ">✕ Close</button>
-      </div>
-      ${links.length === 0 ? '<p style="color:#64748b; text-align:center;">No emails suppressed yet.</p>' : rows}
-    </div>
-  `;
-
-  modal.addEventListener('click', (e) => {
-    if (e.target === modal) modal.remove();
-  });
-
-  document.body.appendChild(modal);
-}
-
-// ── Cancel 2FA ───────────────────────────────────────────────────
-
-function cancel2FA() {
-  if (_2faPollInterval) clearInterval(_2faPollInterval);
-  const form = document.getElementById('login-form');
-  const waiting = document.getElementById('2fa-waiting');
-  if (form) form.style.display = 'block';
-  if (waiting) waiting.style.display = 'none';
-  setStatus('login-status', '', 'info');
-  setLoading('login-btn', false, 'Sign In');
-}
-
-// ── Dev Link button on demand ────────────────────────────────────
 
 async function openDevLinks() {
   try {
     const res  = await fetch(`${API}/dev-links`);
     if (!res.ok) {
-      alert('Dev links are only available in development mode (MAIL_SUPPRESS_SEND=true).');
+      alert('Dev links only available with MAIL_SUPPRESS_SEND=true.');
       return;
     }
     const data = await res.json();
-    showAllDevLinks(data.links || []);
+    const old  = document.getElementById('dev-email-modal');
+    if (old) old.remove();
+
+    const modal = document.createElement('div');
+    modal.id = 'dev-email-modal';
+    modal.className = 'dev-modal-backdrop';
+
+    const links = data.links || [];
+    const rows  = links.map(entry => `
+      <div class="dev-link-box" style="margin-bottom:10px;">
+        <div style="display:flex;justify-content:space-between;align-items:start;flex-wrap:wrap;gap:8px;margin-bottom:8px;">
+          <div>
+            <span style="font-size:11px;color:var(--text-3);">To: ${entry.to}</span><br>
+            <span style="font-size:11px;color:var(--text-3);">${entry.subject}</span>
+          </div>
+          <a href="${entry.link}" target="_blank"
+             style="padding:5px 12px;background:var(--cyan);color:#0a0e1a;
+                    border-radius:6px;text-decoration:none;font-weight:700;font-size:12px;white-space:nowrap;">
+            Open →
+          </a>
+        </div>
+        <a href="${entry.link}" target="_blank"
+           style="font-size:12px;color:var(--cyan);word-break:break-all;line-height:1.5;">
+          ${entry.link}
+        </a>
+      </div>
+    `).join('');
+
+    modal.innerHTML = `
+      <div class="dev-modal" style="max-width:640px;">
+        <div class="dev-modal-header">
+          <h2>🛠️ Dev Email Links (${links.length})</h2>
+          <button onclick="document.getElementById('dev-email-modal').remove();"
+                  class="btn btn-ghost btn-sm" style="width:auto;">✕ Close</button>
+        </div>
+        <div style="max-height:60vh;overflow-y:auto;">
+          ${links.length === 0
+            ? '<p style="color:var(--text-3);text-align:center;padding:20px;">No emails suppressed yet.</p>'
+            : rows}
+        </div>
+      </div>
+    `;
+    modal.addEventListener('click', (e) => { if (e.target === modal) modal.remove(); });
+    document.body.appendChild(modal);
   } catch {
     alert('Could not fetch dev links.');
   }
@@ -502,39 +482,54 @@ async function openDevLinks() {
 document.addEventListener('DOMContentLoaded', () => {
   // Redirect to chat if already logged in
   if (SecureStorage.getAuthToken() && SecureStorage.getUser()) {
-    if (window.location.pathname === '/login' || window.location.pathname === '/register') {
+    const path = window.location.pathname;
+    if (path === '/login' || path === '/register') {
       window.location.href = '/chat';
+      return;
     }
   }
 
-  const regForm   = document.getElementById('register-form');
-  const loginForm = document.getElementById('login-form');
+  // ── Register page ──────────────────────────────────────────
+  const regForm = document.getElementById('register-form');
+  if (regForm) regForm.addEventListener('submit', handleRegister);
 
-  if (regForm)   regForm.addEventListener('submit', handleRegister);
+  // Password strength meter
+  const pwInput = document.getElementById('reg-password');
+  if (pwInput) pwInput.addEventListener('input', () => updateStrengthBar(pwInput.value));
+
+  // ── Login page ─────────────────────────────────────────────
+  const loginForm = document.getElementById('login-form');
   if (loginForm) loginForm.addEventListener('submit', handleLogin);
 
+  // Cancel 2FA
   const cancelBtn = document.getElementById('cancel-2fa-btn');
   if (cancelBtn) cancelBtn.addEventListener('click', cancel2FA);
 
-  // Resend verification form
-  const resendForm = document.getElementById('resend-verification-form');
-  if (resendForm) resendForm.addEventListener('submit', handleResendVerification);
+  // Resend verification forms (exist on both login + register pages in check-email state)
+  const resendForms = document.querySelectorAll('#resend-form');
+  resendForms.forEach(f => f.addEventListener('submit', handleResendVerification));
 
-  // Dev links button
+  // Dev links button (visible on login page in dev mode)
   const devLinksBtn = document.getElementById('dev-links-btn');
-  if (devLinksBtn) devLinksBtn.addEventListener('click', openDevLinks);
+  if (devLinksBtn) {
+    // Show the button itself only if dev mode
+    fetch(`${API}/dev-links`).then(r => {
+      if (r.ok) devLinksBtn.style.display = 'inline-flex';
+    }).catch(() => {});
+    devLinksBtn.addEventListener('click', openDevLinks);
+  }
 
-  // Show query string messages
+  // ── Query-string feedback ──────────────────────────────────
   const params = new URLSearchParams(window.location.search);
   if (params.get('verified') === '1') {
     setStatus('login-status', '✅ Email verified! You can now sign in.', 'success');
   }
-  if (params.get('registered') === '1') {
-    setStatus('login-status', '✅ Registration successful! Please sign in.', 'success');
-  }
   if (params.get('error') === 'invalid_or_expired_link') {
-    setStatus('login-status', '❌ That verification link is invalid or has expired. Please request a new one below.', 'error');
-    const resendSection = document.getElementById('resend-verification');
-    if (resendSection) resendSection.style.display = 'flex';
+    setStatus('login-status',
+      '❌ That link is invalid or has expired. Request a new one below.', 'error');
+    showResendSection();
+  }
+  if (params.get('error') === 'invalid_or_expired_2fa') {
+    setStatus('login-status', '❌ 2FA link expired. Please log in again.', 'error');
   }
 });

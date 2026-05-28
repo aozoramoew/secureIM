@@ -1,60 +1,63 @@
-"""Page routes — serve HTML templates."""
-from flask import Blueprint, render_template, redirect, url_for, request
+"""Page routes — serve Jinja2 HTML templates. FastAPI conversion."""
+import os
 
-routes_bp = Blueprint('routes', __name__)
+from fastapi import APIRouter, Request
+from fastapi.responses import RedirectResponse
+from fastapi.templating import Jinja2Templates
+
+router = APIRouter()
+
+_templates_dir = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), 'templates')
+templates = Jinja2Templates(directory=_templates_dir)
 
 
-@routes_bp.route('/')
+@router.get('/')
 def index():
-    return redirect(url_for('routes.login_page'))
+    return RedirectResponse(url='/login')
 
 
-@routes_bp.route('/login')
-def login_page():
-    return render_template('login.html')
+@router.get('/login')
+def login_page(request: Request):
+    return templates.TemplateResponse('login.html', {'request': request})
 
 
-@routes_bp.route('/register')
-def register_page():
-    return render_template('register.html')
+@router.get('/register')
+def register_page(request: Request):
+    return templates.TemplateResponse('register.html', {'request': request})
 
 
-@routes_bp.route('/chat')
-def chat_page():
-    return render_template('chat.html')
+@router.get('/chat')
+def chat_page(request: Request):
+    return templates.TemplateResponse('chat.html', {'request': request})
 
 
-@routes_bp.route('/verify-email')
-def verify_email_page():
+@router.get('/verify-email')
+def verify_email_page(request: Request, token: str = ''):
     """
-    Email links point to /verify-email?token=... (no /api prefix).
-    We redirect to the API endpoint which performs DB validation
-    and then redirects to /login?verified=1 or /?error=...
+    Email links point to /verify-email?token=...
+    Redirect to the API endpoint which does DB validation.
     """
-    token = request.args.get('token', '')
     if token:
-        return redirect(f'/api/auth/verify-email?token={token}')
-    return render_template('verify_email.html')
+        return RedirectResponse(url=f'/api/auth/verify-email?token={token}')
+    return templates.TemplateResponse('verify_email.html', {'request': request})
 
 
-@routes_bp.route('/authorize-device')
-def authorize_device_page():
+@router.get('/authorize-device')
+def authorize_device_page(request: Request, token: str = ''):
     """
-    2FA links point to /authorize-device?token=... (no /api prefix).
-    We redirect to the API endpoint which activates the device.
+    2FA links point to /authorize-device?token=...
+    Redirect to the API endpoint which activates the device.
     """
-    token = request.args.get('token', '')
     if token:
-        return redirect(f'/api/auth/2fa-verify?token={token}')
-    return render_template('device_authorized.html')
+        return RedirectResponse(url=f'/api/auth/2fa-verify?token={token}')
+    return templates.TemplateResponse('device_authorized.html', {'request': request})
 
 
-@routes_bp.route('/two-factor')
-def two_factor_page():
-    return render_template('two_factor.html')
+@router.get('/two-factor')
+def two_factor_page(request: Request):
+    return templates.TemplateResponse('two_factor.html', {'request': request})
 
 
-@routes_bp.route('/device-authorized')
-def device_authorized_page():
-    """Shown after 2FA device approval (auth.py redirects here)."""
-    return render_template('device_authorized.html')
+@router.get('/device-authorized')
+def device_authorized_page(request: Request):
+    return templates.TemplateResponse('device_authorized.html', {'request': request})

@@ -1,325 +1,312 @@
 """
-Chat blueprint — REST API + SocketIO event handlers.
+Chat API router + SocketIO event handlers — FastAPI / python-socketio conversion.
 
 REST routes (all require Bearer JWT):
-  GET  /api/chat/users                     — search/list users
-  GET  /api/chat/users/<username>/keys     — get all active device keys for a user
-  GET  /api/chat/messages/<user_id>        — load DM history
-  DELETE /api/chat/messages/<msg_id>       — delete message (local or deep)
-  POST /api/chat/sessions                  — initiate ECDH session
-  GET  /api/chat/sessions/<id>             — get session info
-  POST /api/chat/groups                    — create group
-  GET  /api/chat/groups                    — list user's groups
-  GET  /api/chat/groups/<id>/messages      — group message history
-  POST /api/chat/contacts/<id>/verify      — mark contact as verified
-  GET  /api/chat/contacts/verified         — list verified contacts
+  GET  /api/chat/users                    — search/list users
+  GET  /api/chat/users/{username}/keys    — device public keys (E2EE multi-device)
+  GET  /api/chat/messages/{contact_id}    — DM history
+  DELETE /api/chat/messages/{msg_id}      — delete message
+  POST   /api/chat/sessions               — initiate ECDH session
+  GET|PUT /api/chat/sessions/{id}         — session info / complete handshake
+  POST   /api/chat/groups                 — create group
+  GET    /api/chat/groups                 — list user's groups
+  GET    /api/chat/groups/{id}/messages   — group message history
+  PUT    /api/chat/groups/{id}/keys       — update encrypted group keys
+  POST   /api/chat/contacts/{id}/verify   — mark contact as verified
+  GET    /api/chat/contacts/verified      — list verified contacts
+  POST   /api/chat/messages/{id}/read     — mark read / send receipt
+  GET    /api/chat/audit                  — user's own security audit log
 
-SocketIO events (authenticated via JWT in auth header):
+SocketIO events (auth.token = Bearer JWT):
   connect / disconnect
-  send_message          {session_id, encrypted_payloads, msg_type='dm'|'group'}
-  key_exchange_init     {recipient_id, ephemeral_pub}
-  key_exchange_response {session_id, ephemeral_pub}
-  key_rotation          {session_id, new_ephemeral_pub}
-  delete_message        {message_id, delete_type='local'|'deep'}
-  typing                {recipient_id or group_id}
+  send_message    {session_id, encrypted_payloads, msg_type, expires_seconds}
+  typing          {recipient_id, is_typing}
+  delete_message  {message_id, delete_type}
 """
 import json
 from datetime import datetime, timedelta
-from functools import wraps
+from typing import Optional
 
-from flask import Blueprint, request, jsonify, current_app
-from flask_socketio import emit, join_room, leave_room
+from fastapi import APIRouter, Depends, HTTPException, Request
+from pydantic import BaseModel
+from sqlalchemy import or_, and_
+from sqlalchemy.orm import Session
 
-from app import db, socketio
+from app.database import get_db, SessionLocal
 from app.models import (
     User, DeviceKey, Message, Group, GroupMember,
     ChatSession, ContactVerification, AuditLog,
 )
 from app.crypto_utils import decode_jwt
+from app.socket_manager import sio
+from app.auth import get_current_user_and_device
+from config import settings
 
-chat_bp = Blueprint('chat', __name__)
+router = APIRouter()
 
 # sid → {user_id, device_id}
 _connected_sids: dict[str, dict] = {}
 
 
-def _audit(event_type: str, user_id=None, detail: dict | None = None):
-    """Record a security-relevant chat event."""
-    import json
-    try:
-        from flask import request as _req
-        entry = AuditLog(
-            event_type=event_type, user_id=user_id,
-            ip_address=_req.remote_addr,
-            user_agent=_req.headers.get('User-Agent', '')[:256],
-            detail=json.dumps(detail or {}),
-        )
-        db.session.add(entry)
-        db.session.commit()
-    except Exception:
-        pass
+# ── SocketIO helpers ─────────────────────────────────────────────
+
+async def _emit_to_user(user_id: int, event: str, data: dict):
+    """Emit a SocketIO event to all active connections of a user."""
+    for sid, info in list(_connected_sids.items()):
+        if info['user_id'] == user_id:
+            await sio.emit(event, data, room=sid)
 
 
-# ── JWT helper for REST ────────────────────────────────────────────
-
-def _get_current_user_device():
-    auth = request.headers.get('Authorization', '')
-    if not auth.startswith('Bearer '):
+def _get_socket_user(token: str | None):
+    """Decode JWT from SocketIO auth dict. Returns (user, device_id) or (None, None)."""
+    if not token:
         return None, None
-    payload = decode_jwt(auth.split(' ', 1)[1])
+    if token.startswith('Bearer '):
+        token = token.split(' ', 1)[1]
+    payload = decode_jwt(token)
     if not payload:
         return None, None
-    user = User.query.get(int(payload['sub']))
-    device = DeviceKey.query.filter_by(
-        user_id=user.id if user else 0,
-        device_id=payload.get('device_id'),
-        is_active=True,
-    ).first() if user else None
-    return user, device
+    db = SessionLocal()
+    try:
+        user = db.get(User, int(payload['sub']))
+        device_id = payload.get('device_id')
+        return user, device_id
+    finally:
+        db.close()
 
 
-def jwt_required(f):
-    @wraps(f)
-    def decorated(*args, **kwargs):
-        user, device = _get_current_user_device()
-        if not user or not device:
-            return jsonify({'error': 'Unauthorized'}), 401
-        return f(user, device, *args, **kwargs)
-    return decorated
+# ══════════════════════════════════════════════
+#  SOCKET.IO EVENTS
+# ══════════════════════════════════════════════
+
+@sio.event
+async def connect(sid, environ, auth):
+    token = (auth or {}).get('token', '')
+    user, device_id = _get_socket_user(token)
+    if not user or not device_id:
+        return False  # Reject connection
+
+    _connected_sids[sid] = {'user_id': user.id, 'device_id': device_id}
+    await sio.enter_room(sid, f'user_{user.id}')
+    await sio.emit('user_online', {'user_id': user.id, 'username': user.username})
+
+
+@sio.event
+async def disconnect(sid):
+    info = _connected_sids.pop(sid, None)
+    if info:
+        user_id = info['user_id']
+        still_online = any(v['user_id'] == user_id for v in _connected_sids.values())
+        if not still_online:
+            db = SessionLocal()
+            try:
+                user = db.get(User, user_id)
+                username = user.username if user else 'unknown'
+            finally:
+                db.close()
+            await sio.emit('user_offline', {'user_id': user_id, 'username': username})
+        await sio.leave_room(sid, f'user_{user_id}')
+
+
+@sio.event
+async def send_message(sid, data):
+    """
+    data = {
+      session_id: int,           # DM — ECDH session ID
+      group_id: int,             # Group
+      encrypted_payloads: {},    # {device_id: {ciphertext, nonce, hmac}}
+      msg_type: 'dm' | 'group'
+      expires_seconds: int|None  # Self-destruct timer
+    }
+    Server stores only ciphertext — never reads message content.
+    """
+    info = _connected_sids.get(sid)
+    if not info:
+        return
+
+    db = SessionLocal()
+    try:
+        sender = db.get(User, info['user_id'])
+        if not sender:
+            return
+
+        payloads_json = json.dumps(data.get('encrypted_payloads', {}))
+        msg_type = data.get('msg_type', 'dm')
+
+        if msg_type == 'group':
+            group_id = data.get('group_id')
+            member = db.query(GroupMember).filter_by(
+                group_id=group_id, user_id=sender.id
+            ).first()
+            if not member:
+                return
+
+            msg = Message(
+                sender_id=sender.id,
+                group_id=group_id,
+                encrypted_payloads=payloads_json,
+            )
+            db.add(msg)
+            db.commit()
+
+            msg_dict = msg.to_dict(requesting_user_id=sender.id)
+            msg_dict['sender_username'] = sender.username
+
+            for gm in db.query(GroupMember).filter_by(group_id=group_id).all():
+                await _emit_to_user(gm.user_id, 'receive_message', msg_dict)
+
+        else:  # DM
+            session_id = data.get('session_id')
+            sess = db.get(ChatSession, session_id)
+            if not sess or not sess.is_active:
+                return
+
+            recipient_id = sess.user_b_id if sess.user_a_id == sender.id else sess.user_a_id
+
+            expires_seconds = data.get('expires_seconds')
+            expires_at = None
+            if expires_seconds:
+                expires_at = datetime.utcnow() + timedelta(seconds=int(expires_seconds))
+
+            msg = Message(
+                sender_id=sender.id,
+                recipient_id=recipient_id,
+                encrypted_payloads=payloads_json,
+                delivered_at=datetime.utcnow(),
+                expires_at=expires_at,
+            )
+            db.add(msg)
+
+            sess.message_count += 1
+            needs_rotation = sess.message_count >= settings.KEY_ROTATION_THRESHOLD
+            db.commit()
+
+            msg_dict = msg.to_dict(requesting_user_id=sender.id)
+            msg_dict['sender_username'] = sender.username
+
+            await _emit_to_user(sender.id,    'receive_message', msg_dict)
+            await _emit_to_user(recipient_id, 'receive_message', msg_dict)
+
+            if needs_rotation:
+                await sio.emit('key_rotation_required', {'session_id': session_id}, room=sid)
+                await _emit_to_user(recipient_id, 'key_rotation_required',
+                                    {'session_id': session_id})
+    finally:
+        db.close()
+
+
+@sio.event
+async def typing(sid, data):
+    info = _connected_sids.get(sid)
+    if not info:
+        return
+    target = data.get('recipient_id') or data.get('group_id')
+    if not target:
+        return
+    await _emit_to_user(target, 'typing', {
+        'user_id':  info['user_id'],
+        'is_typing': data.get('is_typing', True),
+    })
+
+
+@sio.event
+async def delete_message(sid, data):
+    info = _connected_sids.get(sid)
+    if not info:
+        return
+
+    db = SessionLocal()
+    try:
+        msg_id      = data.get('message_id')
+        delete_type = data.get('delete_type', 'local')
+        user_id     = info['user_id']
+
+        msg = db.get(Message, msg_id)
+        if not msg:
+            return
+        if user_id not in (msg.sender_id, msg.recipient_id):
+            return
+
+        if delete_type == 'deep':
+            msg.is_deep_deleted    = True
+            msg.deep_deleted_at    = datetime.utcnow()
+            msg.deep_deleted_by    = user_id
+            msg.encrypted_payloads = '{}'
+            db.commit()
+            await _emit_to_user(msg.sender_id,    'message_deleted',
+                                 {'message_id': msg_id, 'type': 'deep'})
+            await _emit_to_user(msg.recipient_id, 'message_deleted',
+                                 {'message_id': msg_id, 'type': 'deep'})
+        else:
+            msg.add_deleted_for(user_id)
+            db.commit()
+            await sio.emit('message_deleted', {'message_id': msg_id, 'type': 'local'}, room=sid)
+    finally:
+        db.close()
 
 
 # ══════════════════════════════════════════════
 #  REST ROUTES
 # ══════════════════════════════════════════════
 
-@chat_bp.route('/users', methods=['GET'])
-@jwt_required
-def list_users(current_user, current_device):
-    q = request.args.get('q', '').strip().lower()
-    query = User.query.filter(User.id != current_user.id, User.is_email_verified == True)
+@router.get('/users')
+def list_users(
+    q: str = '',
+    auth=Depends(get_current_user_and_device),
+    db: Session = Depends(get_db),
+):
+    current_user, _ = auth
+    query = db.query(User).filter(
+        User.id != current_user.id,
+        User.is_email_verified == True,  # noqa: E712
+    )
     if q:
         query = query.filter(User.username.ilike(f'%{q}%'))
     users = query.limit(30).all()
 
-    # Attach verified status
     verified_ids = {
         cv.contact_id
-        for cv in ContactVerification.query.filter_by(user_id=current_user.id).all()
+        for cv in db.query(ContactVerification).filter_by(user_id=current_user.id).all()
     }
     result = []
     for u in users:
         d = u.to_dict()
         d['is_verified_by_me'] = u.id in verified_ids
-        d['is_online'] = any(
-            info['user_id'] == u.id for info in _connected_sids.values()
-        )
+        d['is_online'] = any(info['user_id'] == u.id for info in _connected_sids.values())
         result.append(d)
-    return jsonify({'users': result}), 200
+    return {'users': result}
 
 
-@chat_bp.route('/users/<string:username>/keys', methods=['GET'])
-@jwt_required
-def get_user_keys(current_user, current_device, username):
-    """Return all active device public keys for a user (needed for E2EE multi-device)."""
-    user = User.query.filter_by(username=username).first_or_404()
-    devices = DeviceKey.query.filter_by(user_id=user.id, is_active=True).all()
-    return jsonify({
-        'user_id':  user.id,
-        'username': user.username,
-        'devices':  [d.to_dict() for d in devices],
-    }), 200
+@router.get('/users/{username}/keys')
+def get_user_keys(
+    username: str,
+    auth=Depends(get_current_user_and_device),
+    db: Session = Depends(get_db),
+):
+    user = db.query(User).filter_by(username=username).first()
+    if not user:
+        raise HTTPException(status_code=404, detail='User not found')
+    devices = db.query(DeviceKey).filter_by(user_id=user.id, is_active=True).all()
+    return {'user_id': user.id, 'username': user.username, 'devices': [d.to_dict() for d in devices]}
 
 
-# ── DM History ────────────────────────────────────────────────────
-
-@chat_bp.route('/messages/<int:contact_id>', methods=['GET'])
-@jwt_required
-def get_dm_history(current_user, current_device, contact_id):
-    before_id = request.args.get('before_id', type=int)
-    limit = min(int(request.args.get('limit', 50)), 100)
-
-    q = Message.query.filter(
-        Message.group_id == None,
-        db.or_(
-            db.and_(Message.sender_id == current_user.id,    Message.recipient_id == contact_id),
-            db.and_(Message.sender_id == contact_id, Message.recipient_id == current_user.id),
+@router.get('/messages/{contact_id}')
+def get_dm_history(
+    contact_id: int,
+    before_id: Optional[int] = None,
+    limit: int = 50,
+    auth=Depends(get_current_user_and_device),
+    db: Session = Depends(get_db),
+):
+    current_user, _ = auth
+    limit = min(limit, 100)
+    q = db.query(Message).filter(
+        Message.group_id == None,  # noqa: E711
+        or_(
+            and_(Message.sender_id == current_user.id, Message.recipient_id == contact_id),
+            and_(Message.sender_id == contact_id,      Message.recipient_id == current_user.id),
         ),
     ).order_by(Message.timestamp.desc())
-
-    if before_id:
-        q = q.filter(Message.id < before_id)
-
-    messages = q.limit(limit).all()
-    result = []
-    for m in reversed(messages):
-        if current_user.id in m.get_deleted_for():
-            continue  # Hidden for this user (delete-for-me)
-        result.append(m.to_dict(requesting_user_id=current_user.id))
-    return jsonify({'messages': result}), 200
-
-
-# ── Message Deletion ──────────────────────────────────────────────
-
-@chat_bp.route('/messages/<int:msg_id>', methods=['DELETE'])
-@jwt_required
-def delete_message(current_user, current_device, msg_id):
-    delete_type = request.args.get('type', 'local')  # 'local' | 'deep'
-    msg = Message.query.get_or_404(msg_id)
-
-    # Only sender or recipient can delete
-    if current_user.id not in (msg.sender_id, msg.recipient_id):
-        if msg.group_id:
-            member = GroupMember.query.filter_by(
-                group_id=msg.group_id, user_id=current_user.id
-            ).first()
-            if not member:
-                return jsonify({'error': 'Forbidden'}), 403
-        else:
-            return jsonify({'error': 'Forbidden'}), 403
-
-    if delete_type == 'deep':
-        msg.is_deep_deleted = True
-        msg.deep_deleted_at = datetime.utcnow()
-        msg.deep_deleted_by = current_user.id
-        msg.encrypted_payloads = '{}'
-        db.session.commit()
-        _audit('deep_delete', user_id=current_user.id,
-               detail={'message_id': msg_id, 'recipient_id': msg.recipient_id})
-        # Notify all parties
-        _emit_to_user(msg.sender_id,    'message_deleted', {'message_id': msg_id, 'type': 'deep'})
-        _emit_to_user(msg.recipient_id, 'message_deleted', {'message_id': msg_id, 'type': 'deep'})
-    else:
-        # Local delete — only hides for current user
-        msg.add_deleted_for(current_user.id)
-        db.session.commit()
-
-    return jsonify({'message': 'Deleted', 'type': delete_type}), 200
-
-
-# ── ECDH Session Management ───────────────────────────────────────
-
-@chat_bp.route('/sessions', methods=['POST'])
-@jwt_required
-def create_session(current_user, current_device):
-    """Alice calls this to start ECDH with Bob. Stores Alice's ephemeral pub key."""
-    data = request.get_json(silent=True) or {}
-    recipient_id   = data.get('recipient_id')
-    ephemeral_pub  = data.get('ephemeral_pub')  # JWK JSON string
-    ephemeral_sig  = data.get('ephemeral_sig')  # ECDSA P-384 signature (base64)
-
-    if not recipient_id or not ephemeral_pub or not ephemeral_sig:
-        return jsonify({'error': 'recipient_id, ephemeral_pub and ephemeral_sig required'}), 400
-
-    # Deactivate old sessions between these two users
-    ChatSession.query.filter(
-        db.or_(
-            db.and_(ChatSession.user_a_id == current_user.id, ChatSession.user_b_id == recipient_id),
-            db.and_(ChatSession.user_a_id == recipient_id,    ChatSession.user_b_id == current_user.id),
-        ),
-        ChatSession.is_active == True,
-    ).update({'is_active': False})
-
-    session = ChatSession(
-        user_a_id=current_user.id,
-        user_b_id=recipient_id,
-        ephemeral_pub_a=ephemeral_pub,
-        ephemeral_sig_a=ephemeral_sig,
-    )
-    db.session.add(session)
-    db.session.commit()
-
-    # Notify Bob that Alice wants to start a session
-    _emit_to_user(recipient_id, 'session_request', {
-        'session_id':       session.id,
-        'initiator_id':     current_user.id,
-        'initiator':        current_user.username,
-        'ephemeral_pub_a':  ephemeral_pub,
-        'ephemeral_sig_a':  ephemeral_sig,   # Recipient must verify this signature
-    })
-
-    return jsonify({'session': session.to_dict()}), 201
-
-
-@chat_bp.route('/sessions/<int:session_id>', methods=['GET', 'PUT'])
-@jwt_required
-def session_detail(current_user, current_device, session_id):
-    sess = ChatSession.query.get_or_404(session_id)
-
-    if request.method == 'GET':
-        return jsonify({'session': sess.to_dict()}), 200
-
-    # PUT — Bob submits his ephemeral pub key + signature to complete handshake
-    data = request.get_json(silent=True) or {}
-    sess.ephemeral_pub_b = data.get('ephemeral_pub')
-    sess.ephemeral_sig_b = data.get('ephemeral_sig')
-    db.session.commit()
-
-    # Notify Alice that the handshake is complete
-    _emit_to_user(sess.user_a_id, 'session_ready', {
-        'session_id':      sess.id,
-        'ephemeral_pub_b': sess.ephemeral_pub_b,
-        'ephemeral_sig_b': sess.ephemeral_sig_b,  # Alice must verify this signature
-    })
-
-    return jsonify({'session': sess.to_dict()}), 200
-
-
-# ── Group Chat ───────────────────────────────────────────────────
-
-@chat_bp.route('/groups', methods=['POST'])
-@jwt_required
-def create_group(current_user, current_device):
-    data = request.get_json(silent=True) or {}
-    name       = (data.get('name') or '').strip()
-    member_ids = data.get('member_ids', [])  # list of user IDs
-
-    if not name:
-        return jsonify({'error': 'Group name required'}), 400
-
-    group = Group(name=name, created_by=current_user.id)
-    db.session.add(group)
-    db.session.flush()
-
-    # Add creator as admin
-    all_ids = list(set([current_user.id] + member_ids))
-    for uid in all_ids:
-        gm = GroupMember(
-            group_id=group.id,
-            user_id=uid,
-            is_admin=(uid == current_user.id),
-        )
-        db.session.add(gm)
-    db.session.commit()
-
-    # Notify all members
-    for uid in all_ids:
-        _emit_to_user(uid, 'group_created', {
-            'group': group.to_dict(),
-            'members': all_ids,
-        })
-
-    return jsonify({'group': group.to_dict()}), 201
-
-
-@chat_bp.route('/groups', methods=['GET'])
-@jwt_required
-def list_groups(current_user, current_device):
-    memberships = GroupMember.query.filter_by(user_id=current_user.id).all()
-    groups = [Group.query.get(m.group_id).to_dict() for m in memberships if Group.query.get(m.group_id)]
-    return jsonify({'groups': groups}), 200
-
-
-@chat_bp.route('/groups/<int:group_id>/messages', methods=['GET'])
-@jwt_required
-def get_group_history(current_user, current_device, group_id):
-    member = GroupMember.query.filter_by(group_id=group_id, user_id=current_user.id).first()
-    if not member:
-        return jsonify({'error': 'Not a member of this group'}), 403
-
-    before_id = request.args.get('before_id', type=int)
-    limit = min(int(request.args.get('limit', 50)), 100)
-
-    q = Message.query.filter_by(group_id=group_id).order_by(Message.timestamp.desc())
     if before_id:
         q = q.filter(Message.id < before_id)
 
@@ -329,269 +316,295 @@ def get_group_history(current_user, current_device, group_id):
         if current_user.id in m.get_deleted_for():
             continue
         result.append(m.to_dict(requesting_user_id=current_user.id))
-    return jsonify({'messages': result}), 200
+    return {'messages': result}
 
 
-@chat_bp.route('/groups/<int:group_id>/keys', methods=['PUT'])
-@jwt_required
-def update_group_keys(current_user, current_device, group_id):
-    """Members submit their encrypted copies of the group key."""
-    member = GroupMember.query.filter_by(group_id=group_id, user_id=current_user.id).first()
+@router.delete('/messages/{msg_id}')
+def delete_message_rest(
+    msg_id: int,
+    type: str = 'local',
+    auth=Depends(get_current_user_and_device),
+    db: Session = Depends(get_db),
+):
+    current_user, _ = auth
+    msg = db.get(Message, msg_id)
+    if not msg:
+        raise HTTPException(status_code=404, detail='Message not found')
+    if current_user.id not in (msg.sender_id, msg.recipient_id):
+        raise HTTPException(status_code=403, detail='Forbidden')
+
+    import asyncio
+    if type == 'deep':
+        msg.is_deep_deleted    = True
+        msg.deep_deleted_at    = datetime.utcnow()
+        msg.deep_deleted_by    = current_user.id
+        msg.encrypted_payloads = '{}'
+        db.commit()
+        asyncio.run(_emit_to_user(msg.sender_id,    'message_deleted', {'message_id': msg_id, 'type': 'deep'}))
+        asyncio.run(_emit_to_user(msg.recipient_id, 'message_deleted', {'message_id': msg_id, 'type': 'deep'}))
+    else:
+        msg.add_deleted_for(current_user.id)
+        db.commit()
+    return {'message': 'Deleted', 'type': type}
+
+
+# ── ECDH Sessions ────────────────────────────────────────────────
+
+class CreateSessionBody(BaseModel):
+    recipient_id:  int
+    ephemeral_pub: str
+    ephemeral_sig: str
+
+
+class UpdateSessionBody(BaseModel):
+    ephemeral_pub: str
+    ephemeral_sig: str
+
+
+@router.post('/sessions', status_code=201)
+async def create_session(
+    body: CreateSessionBody,
+    auth=Depends(get_current_user_and_device),
+    db: Session = Depends(get_db),
+):
+    current_user, _ = auth
+
+    # Deactivate old sessions between these two users
+    db.query(ChatSession).filter(
+        or_(
+            and_(ChatSession.user_a_id == current_user.id, ChatSession.user_b_id == body.recipient_id),
+            and_(ChatSession.user_a_id == body.recipient_id, ChatSession.user_b_id == current_user.id),
+        ),
+        ChatSession.is_active == True,  # noqa: E712
+    ).update({'is_active': False})
+
+    session = ChatSession(
+        user_a_id=current_user.id,
+        user_b_id=body.recipient_id,
+        ephemeral_pub_a=body.ephemeral_pub,
+        ephemeral_sig_a=body.ephemeral_sig,
+    )
+    db.add(session)
+    db.commit()
+
+    await _emit_to_user(body.recipient_id, 'session_request', {
+        'session_id':      session.id,
+        'initiator_id':    current_user.id,
+        'initiator':       current_user.username,
+        'ephemeral_pub_a': body.ephemeral_pub,
+        'ephemeral_sig_a': body.ephemeral_sig,
+    })
+    return {'session': session.to_dict()}
+
+
+@router.get('/sessions/{session_id}')
+def get_session(
+    session_id: int,
+    auth=Depends(get_current_user_and_device),
+    db: Session = Depends(get_db),
+):
+    sess = db.get(ChatSession, session_id)
+    if not sess:
+        raise HTTPException(status_code=404, detail='Session not found')
+    return {'session': sess.to_dict()}
+
+
+@router.put('/sessions/{session_id}')
+async def update_session(
+    session_id: int,
+    body: UpdateSessionBody,
+    auth=Depends(get_current_user_and_device),
+    db: Session = Depends(get_db),
+):
+    sess = db.get(ChatSession, session_id)
+    if not sess:
+        raise HTTPException(status_code=404, detail='Session not found')
+
+    sess.ephemeral_pub_b = body.ephemeral_pub
+    sess.ephemeral_sig_b = body.ephemeral_sig
+    db.commit()
+
+    await _emit_to_user(sess.user_a_id, 'session_ready', {
+        'session_id':      sess.id,
+        'ephemeral_pub_b': sess.ephemeral_pub_b,
+        'ephemeral_sig_b': sess.ephemeral_sig_b,
+    })
+    return {'session': sess.to_dict()}
+
+
+# ── Groups ───────────────────────────────────────────────────────
+
+class CreateGroupBody(BaseModel):
+    name:       str
+    member_ids: list[int] = []
+
+
+@router.post('/groups', status_code=201)
+async def create_group(
+    body: CreateGroupBody,
+    auth=Depends(get_current_user_and_device),
+    db: Session = Depends(get_db),
+):
+    current_user, _ = auth
+    name = body.name.strip()
+    if not name:
+        raise HTTPException(status_code=400, detail='Group name required')
+
+    group = Group(name=name, created_by=current_user.id)
+    db.add(group)
+    db.flush()
+
+    all_ids = list(set([current_user.id] + body.member_ids))
+    for uid in all_ids:
+        db.add(GroupMember(
+            group_id=group.id, user_id=uid,
+            is_admin=(uid == current_user.id),
+        ))
+    db.commit()
+
+    for uid in all_ids:
+        await _emit_to_user(uid, 'group_created', {'group': group.to_dict(), 'members': all_ids})
+    return {'group': group.to_dict()}
+
+
+@router.get('/groups')
+def list_groups(
+    auth=Depends(get_current_user_and_device),
+    db: Session = Depends(get_db),
+):
+    current_user, _ = auth
+    memberships = db.query(GroupMember).filter_by(user_id=current_user.id).all()
+    groups = []
+    for m in memberships:
+        g = db.get(Group, m.group_id)
+        if g:
+            groups.append(g.to_dict())
+    return {'groups': groups}
+
+
+@router.get('/groups/{group_id}/messages')
+def get_group_history(
+    group_id: int,
+    before_id: Optional[int] = None,
+    limit: int = 50,
+    auth=Depends(get_current_user_and_device),
+    db: Session = Depends(get_db),
+):
+    current_user, _ = auth
+    member = db.query(GroupMember).filter_by(group_id=group_id, user_id=current_user.id).first()
     if not member:
-        return jsonify({'error': 'Not a member'}), 403
-    data = request.get_json(silent=True) or {}
-    # data['encrypted_keys'] = {device_id: encrypted_group_key_base64}
+        raise HTTPException(status_code=403, detail='Not a member')
+
+    limit = min(limit, 100)
+    q = db.query(Message).filter_by(group_id=group_id).order_by(Message.timestamp.desc())
+    if before_id:
+        q = q.filter(Message.id < before_id)
+
+    messages = q.limit(limit).all()
+    result = [m.to_dict(requesting_user_id=current_user.id) for m in reversed(messages)
+              if current_user.id not in m.get_deleted_for()]
+    return {'messages': result}
+
+
+class UpdateGroupKeysBody(BaseModel):
+    encrypted_keys: dict = {}
+
+
+@router.put('/groups/{group_id}/keys')
+def update_group_keys(
+    group_id: int,
+    body: UpdateGroupKeysBody,
+    auth=Depends(get_current_user_and_device),
+    db: Session = Depends(get_db),
+):
+    current_user, _ = auth
+    member = db.query(GroupMember).filter_by(group_id=group_id, user_id=current_user.id).first()
+    if not member:
+        raise HTTPException(status_code=403, detail='Not a member')
     existing = json.loads(member.encrypted_group_keys or '{}')
-    existing.update(data.get('encrypted_keys', {}))
+    existing.update(body.encrypted_keys)
     member.encrypted_group_keys = json.dumps(existing)
-    db.session.commit()
-    return jsonify({'message': 'Keys updated'}), 200
+    db.commit()
+    return {'message': 'Keys updated'}
 
 
-# ── Contact Verification ─────────────────────────────────────────
+# ── Contacts ─────────────────────────────────────────────────────
 
-@chat_bp.route('/contacts/<int:contact_id>/verify', methods=['POST'])
-@jwt_required
-def verify_contact(current_user, current_device, contact_id):
-    data = request.get_json(silent=True) or {}
-    fingerprint = data.get('fingerprint', '')
+class VerifyContactBody(BaseModel):
+    fingerprint: str
 
-    cv = ContactVerification.query.filter_by(
+
+@router.post('/contacts/{contact_id}/verify')
+def verify_contact(
+    contact_id: int,
+    body: VerifyContactBody,
+    auth=Depends(get_current_user_and_device),
+    db: Session = Depends(get_db),
+):
+    current_user, _ = auth
+    cv = db.query(ContactVerification).filter_by(
         user_id=current_user.id, contact_id=contact_id
     ).first()
     if cv:
-        cv.verified_at = datetime.utcnow()
-        cv.key_fingerprint = fingerprint
+        cv.verified_at     = datetime.utcnow()
+        cv.key_fingerprint = body.fingerprint
     else:
         cv = ContactVerification(
             user_id=current_user.id,
             contact_id=contact_id,
-            key_fingerprint=fingerprint,
+            key_fingerprint=body.fingerprint,
         )
-        db.session.add(cv)
-    db.session.commit()
-    return jsonify({'verified': True, 'fingerprint': fingerprint}), 200
+        db.add(cv)
+    db.commit()
+    return {'verified': True, 'fingerprint': body.fingerprint}
 
 
-@chat_bp.route('/contacts/verified', methods=['GET'])
-@jwt_required
-def verified_contacts(current_user, current_device):
-    cvs = ContactVerification.query.filter_by(user_id=current_user.id).all()
-    return jsonify({
-        'verified': [
-            {'contact_id': cv.contact_id, 'fingerprint': cv.key_fingerprint,
-             'verified_at': cv.verified_at.isoformat()}
-            for cv in cvs
-        ]
-    }), 200
+@router.get('/contacts/verified')
+def verified_contacts(
+    auth=Depends(get_current_user_and_device),
+    db: Session = Depends(get_db),
+):
+    current_user, _ = auth
+    cvs = db.query(ContactVerification).filter_by(user_id=current_user.id).all()
+    return {'verified': [
+        {'contact_id': cv.contact_id, 'fingerprint': cv.key_fingerprint,
+         'verified_at': cv.verified_at.isoformat()}
+        for cv in cvs
+    ]}
 
 
 # ── Read Receipts ────────────────────────────────────────────────
 
-@chat_bp.route('/messages/<int:msg_id>/read', methods=['POST'])
-@jwt_required
-def mark_message_read(current_user, current_device, msg_id):
-    """Mark a message as read. Emits 'message_read' to sender."""
-    msg = Message.query.get_or_404(msg_id)
+@router.post('/messages/{msg_id}/read')
+async def mark_message_read(
+    msg_id: int,
+    auth=Depends(get_current_user_and_device),
+    db: Session = Depends(get_db),
+):
+    current_user, _ = auth
+    msg = db.get(Message, msg_id)
+    if not msg:
+        raise HTTPException(status_code=404, detail='Message not found')
     if msg.recipient_id != current_user.id:
-        return jsonify({'error': 'Forbidden'}), 403
+        raise HTTPException(status_code=403, detail='Forbidden')
     if not msg.read_at:
         msg.read_at = datetime.utcnow()
-        db.session.commit()
-        _emit_to_user(msg.sender_id, 'message_read', {
+        db.commit()
+        await _emit_to_user(msg.sender_id, 'message_read', {
             'message_id': msg_id,
             'read_at': msg.read_at.isoformat(),
         })
-    return jsonify({'read_at': msg.read_at.isoformat()}), 200
+    return {'read_at': msg.read_at.isoformat()}
 
 
-# ── Audit Log API ─────────────────────────────────────────────────
+# ── Audit Log ────────────────────────────────────────────────────
 
-@chat_bp.route('/audit', methods=['GET'])
-@jwt_required
-def get_audit_log(current_user, current_device):
-    """Return this user's own audit log (last 100 events)."""
-    logs = AuditLog.query.filter_by(user_id=current_user.id)\
+@router.get('/audit')
+def get_audit_log(
+    auth=Depends(get_current_user_and_device),
+    db: Session = Depends(get_db),
+):
+    current_user, _ = auth
+    logs = db.query(AuditLog).filter_by(user_id=current_user.id)\
         .order_by(AuditLog.timestamp.desc()).limit(100).all()
-    return jsonify({'audit': [l.to_dict() for l in logs]}), 200
-
-
-# ══════════════════════════════════════════════
-#  SOCKET.IO EVENTS
-# ══════════════════════════════════════════════
-
-def _get_socket_user(environ_or_auth: str | None):
-    """Decode JWT from SocketIO auth data."""
-    if not environ_or_auth:
-        return None, None
-    if environ_or_auth.startswith('Bearer '):
-        environ_or_auth = environ_or_auth.split(' ', 1)[1]
-    payload = decode_jwt(environ_or_auth)
-    if not payload:
-        return None, None
-    user = User.query.get(int(payload['sub']))
-    device_id = payload.get('device_id')
-    return user, device_id
-
-
-def _emit_to_user(user_id: int, event: str, data: dict):
-    """Emit an event to all active SocketIO connections of a user."""
-    for sid, info in list(_connected_sids.items()):
-        if info['user_id'] == user_id:
-            socketio.emit(event, data, room=sid)
-
-
-@socketio.on('connect')
-def on_connect(auth):
-    token = (auth or {}).get('token', '')
-    user, device_id = _get_socket_user(token)
-    if not user or not device_id:
-        return False  # Reject connection
-
-    _connected_sids[request.sid] = {'user_id': user.id, 'device_id': device_id}
-    join_room(f'user_{user.id}')
-
-    # Broadcast online status to all connected users
-    socketio.emit('user_online', {'user_id': user.id, 'username': user.username}, broadcast=True)
-
-
-@socketio.on('disconnect')
-def on_disconnect():
-    info = _connected_sids.pop(request.sid, None)
-    if info:
-        user_id = info['user_id']
-        # Check if user has other active connections
-        still_online = any(v['user_id'] == user_id for v in _connected_sids.values())
-        if not still_online:
-            user = User.query.get(user_id)
-            username = user.username if user else 'unknown'
-            socketio.emit('user_offline', {'user_id': user_id, 'username': username}, broadcast=True)
-        leave_room(f'user_{user_id}')
-
-
-@socketio.on('send_message')
-def on_send_message(data):
-    """
-    data = {
-      session_id: int,          # for DMs
-      group_id: int,            # for groups
-      encrypted_payloads: {},   # {device_id: {ciphertext, nonce, hmac}}
-      msg_type: 'dm' | 'group'
-    }
-    The server stores only the encrypted payload and relays it.
-    """
-    info = _connected_sids.get(request.sid)
-    if not info:
-        return
-
-    sender = User.query.get(info['user_id'])
-    if not sender:
-        return
-
-    payloads_json = json.dumps(data.get('encrypted_payloads', {}))
-    msg_type = data.get('msg_type', 'dm')
-
-    if msg_type == 'group':
-        group_id = data.get('group_id')
-        member = GroupMember.query.filter_by(group_id=group_id, user_id=sender.id).first()
-        if not member:
-            return
-
-        msg = Message(
-            sender_id=sender.id,
-            group_id=group_id,
-            encrypted_payloads=payloads_json,
-        )
-        db.session.add(msg)
-
-        # Increment session message count for key rotation tracking
-        db.session.commit()
-
-        msg_dict = msg.to_dict(requesting_user_id=sender.id)
-        msg_dict['sender_username'] = sender.username
-
-        # Deliver to all group members
-        for gm in GroupMember.query.filter_by(group_id=group_id).all():
-            _emit_to_user(gm.user_id, 'receive_message', msg_dict)
-
-    else:  # DM
-        session_id = data.get('session_id')
-        sess = ChatSession.query.get(session_id)
-        if not sess or not sess.is_active:
-            return
-
-        recipient_id = sess.user_b_id if sess.user_a_id == sender.id else sess.user_a_id
-
-        # Self-destruct: expires_seconds=0 means no expiry
-        expires_seconds = data.get('expires_seconds')  # e.g. 300, 3600, 86400
-        expires_at = None
-        if expires_seconds:
-            expires_at = datetime.utcnow() + timedelta(seconds=int(expires_seconds))
-
-        msg = Message(
-            sender_id=sender.id,
-            recipient_id=recipient_id,
-            encrypted_payloads=payloads_json,
-            delivered_at=datetime.utcnow(),
-            expires_at=expires_at,
-        )
-        db.session.add(msg)
-
-        # Key rotation tracking
-        sess.message_count += 1
-        needs_rotation = sess.message_count >= current_app.config.get('KEY_ROTATION_THRESHOLD', 100)
-        db.session.commit()
-
-        msg_dict = msg.to_dict(requesting_user_id=sender.id)
-        msg_dict['sender_username'] = sender.username
-
-        _emit_to_user(sender.id,      'receive_message', msg_dict)
-        _emit_to_user(recipient_id,   'receive_message', msg_dict)
-
-        if needs_rotation:
-            emit('key_rotation_required', {'session_id': session_id})
-            _emit_to_user(recipient_id, 'key_rotation_required', {'session_id': session_id})
-
-
-@socketio.on('typing')
-def on_typing(data):
-    info = _connected_sids.get(request.sid)
-    if not info:
-        return
-    target = data.get('recipient_id') or data.get('group_id')
-    if not target:
-        return
-    _emit_to_user(target, 'typing', {
-        'user_id': info['user_id'],
-        'is_typing': data.get('is_typing', True),
-    })
-
-
-@socketio.on('delete_message')
-def on_delete_message(data):
-    info = _connected_sids.get(request.sid)
-    if not info:
-        return
-    msg_id     = data.get('message_id')
-    delete_type = data.get('delete_type', 'local')
-    user_id    = info['user_id']
-
-    msg = Message.query.get(msg_id)
-    if not msg:
-        return
-    if user_id not in (msg.sender_id, msg.recipient_id):
-        return
-
-    if delete_type == 'deep':
-        msg.is_deep_deleted = True
-        msg.deep_deleted_at = datetime.utcnow()
-        msg.deep_deleted_by = user_id
-        # Immediately wipe payload — tombstone stays for UI display
-        msg.encrypted_payloads = '{}'
-        db.session.commit()
-        _emit_to_user(msg.sender_id,    'message_deleted', {'message_id': msg_id, 'type': 'deep'})
-        _emit_to_user(msg.recipient_id, 'message_deleted', {'message_id': msg_id, 'type': 'deep'})
-    else:
-        msg.add_deleted_for(user_id)
-        db.session.commit()
-        emit('message_deleted', {'message_id': msg_id, 'type': 'local'})
+    return {'audit': [l.to_dict() for l in logs]}

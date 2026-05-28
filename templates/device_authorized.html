@@ -1,17 +1,28 @@
-{% extends "base.html" %}
-{% block title %}Device Authorized — SecureIM{% endblock %}
-{% block body %}
-<main class="verify-page">
-  <div class="verify-card">
-    <div class="verify-icon">🔓</div>
-    <h1 style="font-size:22px;margin-bottom:8px;">Device Authorized</h1>
-    <p style="color:var(--text-muted);margin-bottom:12px;">
-      Your device <strong>{{ request.args.get('device', 'Browser') }}</strong> has been authorized.
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Device Authorized — SecureIM</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;600;700&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="/static/css/style.css">
+</head>
+<body>
+<div class="mesh-bg"></div>
+<div class="auth-page">
+  <div class="auth-card glass-card" style="text-align:center; max-width:420px;">
+    <div style="font-size:56px; margin-bottom:20px;">✅</div>
+    <h1 class="auth-title">Device Authorized!</h1>
+    <p class="auth-subtitle" style="margin-bottom:28px;">
+      Your device has been successfully authorized.<br>
+      You can now close this tab and return to the login screen.
     </p>
-    <p style="color:var(--text-muted);font-size:14px;margin-bottom:24px;">
-      You can close this tab — your other browser tab will log in automatically.
-    </p>
-    <a href="/chat" class="btn btn-primary" style="display:inline-flex;width:auto;">Open Chat</a>
+    <a href="/login" class="btn btn-primary" style="display:flex; text-decoration:none;">
+      <span class="btn-text">Go to Login</span>
+    </a>
   </div>
-</main>
-{% endblock %}
+</div>
+</body>
+</html>

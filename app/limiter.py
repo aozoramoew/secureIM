@@ -1,12 +1,10 @@
 """
-Rate limiter singleton.
-Imported by __init__.py and auth.py to apply per-endpoint limits.
+Rate limiter singleton using SlowAPI (FastAPI-compatible Flask-Limiter replacement).
 """
-from flask_limiter import Limiter
-from flask_limiter.util import get_remote_address
+from slowapi import Limiter
+from slowapi.util import get_remote_address
 
 limiter = Limiter(
     key_func=get_remote_address,
-    default_limits=["200 per day", "50 per hour"],
-    storage_uri="memory://",   # override with Redis URL in production
+    default_limits=['200/day', '50/hour'],
 )

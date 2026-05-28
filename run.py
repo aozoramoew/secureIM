@@ -1,20 +1,32 @@
-import os
-from app import create_app, socketio
+"""
+SecureIM entry point — uvicorn / gunicorn.
 
-env = os.environ.get('FLASK_ENV', 'development')
-app = create_app(env)
+Development:
+    python run.py
+    OR: uvicorn run:app --reload --port 8000
+
+Production (Railway / Docker):
+    gunicorn run:app -k uvicorn.workers.UvicornWorker -w 1 -b 0.0.0.0:$PORT
+"""
+import os
+
+from app import create_app
+from config import settings
+
+app = create_app()
 
 if __name__ == '__main__':
-    print("=" * 60)
-    print("  SecureIM — Zero-Trust Messaging System")
-    print(f"  Environment : {env}")
-    print("  Running at  : http://localhost:5000")
-    print("  Email links : check terminal (MAIL_SUPPRESS_SEND=true)")
-    print("=" * 60)
-    socketio.run(
-        app,
+    import uvicorn
+    print('=' * 60)
+    print('  SecureIM — Zero-Trust E2EE Messaging')
+    print(f'  Environment : {"development" if settings.DEBUG else "production"}')
+    print(f'  Running at  : http://localhost:{settings.PORT}')
+    print('  Email links : check terminal (MAIL_SUPPRESS_SEND=true)')
+    print('=' * 60)
+    uvicorn.run(
+        'run:app',
         host='0.0.0.0',
-        port=int(os.environ.get('PORT', 5000)),
-        debug=(env == 'development'),
-        allow_unsafe_werkzeug=True,
+        port=settings.PORT,
+        reload=settings.DEBUG,
+        log_level='info',
     )

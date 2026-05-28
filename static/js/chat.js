@@ -338,11 +338,14 @@ async function openDM(userId, username) {
   clearMessages();
   activeConversation = { type: 'dm', id: userId, username, name: username, sessionId: null };
   document.getElementById('chat-header-name').textContent = username;
+  const avatarEl = document.getElementById('chat-header-avatar');
+  if (avatarEl) { avatarEl.textContent = username[0].toUpperCase(); avatarEl.classList.remove('group-avatar'); }
   document.getElementById('no-chat-placeholder').style.display = 'none';
   document.getElementById('chat-main').style.display = 'flex';
 
   updateEncryptionBadge(false);
   setActiveSidebarItem(userId, 'user');
+  clearUnreadBadge(userId);
 
   // Start ECDH session
   const sess = await initiateSession(userId);
@@ -364,10 +367,13 @@ async function openGroup(groupId, groupName) {
   clearMessages();
   activeConversation = { type: 'group', id: groupId, name: groupName, sessionId: `grp_${groupId}` };
   document.getElementById('chat-header-name').textContent = '# ' + groupName;
+  const avatarEl = document.getElementById('chat-header-avatar');
+  if (avatarEl) { avatarEl.textContent = '#'; avatarEl.classList.add('group-avatar'); }
   document.getElementById('no-chat-placeholder').style.display = 'none';
   document.getElementById('chat-main').style.display = 'flex';
 
   setActiveSidebarItem(groupId, 'group');
+  clearUnreadBadge(groupId);
   updateEncryptionBadge(true);
 
   const convId = `grp_${groupId}`;
@@ -514,12 +520,14 @@ async function loadUserList(q = '') {
     li.className = 'contact-item';
     li.setAttribute('data-user-id', u.id);
     li.innerHTML = `
-      <div class="avatar">${u.username[0].toUpperCase()}</div>
+      <div class="contact-avatar">${u.username[0].toUpperCase()}
+        <span class="online-dot ${u.is_online ? 'online' : 'offline'}"></span>
+      </div>
       <div class="contact-info">
         <span class="contact-name">${escapeHtml(u.username)}</span>
         ${u.is_verified_by_me ? '<span class="verified-badge" title="Public key verified out-of-band">✅ Verified</span>' : ''}
       </div>
-      <span class="online-dot ${u.is_online ? 'online' : 'offline'}"></span>`;
+      <span class="unread-badge"></span>`;
     li.addEventListener('click', () => openDM(u.id, u.username));
     list.appendChild(li);
   });
@@ -534,8 +542,10 @@ async function loadGroups() {
   groups.forEach(g => {
     const li = document.createElement('li');
     li.className = 'contact-item';
-    li.innerHTML = `<div class="avatar group-avatar">#</div>
-      <div class="contact-info"><span class="contact-name">${escapeHtml(g.name)}</span></div>`;
+    li.setAttribute('data-group-id', g.id);
+    li.innerHTML = `<div class="contact-avatar group-avatar">#</div>
+      <div class="contact-info"><span class="contact-name">${escapeHtml(g.name)}</span></div>
+      <span class="unread-badge"></span>`;
     li.onclick = () => openGroup(g.id, g.name);
     list.appendChild(li);
   });
@@ -621,6 +631,8 @@ function getActiveConvId() {
 function renderCurrentUser() {
   const el = document.getElementById('current-username');
   if (el) el.textContent = currentUser.username;
+  const av = document.getElementById('user-avatar-initials');
+  if (av && currentUser.username) av.textContent = currentUser.username[0].toUpperCase();
 }
 
 function updateUserStatus(userId, online) {
@@ -637,11 +649,18 @@ function setActiveSidebarItem(id, type) {
 }
 
 function updateUnreadBadge(id) {
-  // Increment unread count on sidebar item
   const el = document.querySelector(`[data-user-id="${id}"] .unread-badge, [data-group-id="${id}"] .unread-badge`);
   if (el) {
     el.textContent = (+el.textContent || 0) + 1;
-    el.style.display = 'block';
+    el.style.display = 'flex';
+  }
+}
+
+function clearUnreadBadge(id) {
+  const el = document.querySelector(`[data-user-id="${id}"] .unread-badge, [data-group-id="${id}"] .unread-badge`);
+  if (el) {
+    el.textContent = '';
+    el.style.display = 'none';
   }
 }
 
@@ -669,7 +688,7 @@ function showAlert(msg, type = 'info') {
 
 function closeModal(id) {
   const el = document.getElementById(id);
-  if (el) el.style.display = 'none';
+  if (el) el.classList.remove('open');
 }
 
 function logout() {
@@ -742,6 +761,26 @@ document.addEventListener('DOMContentLoaded', () => {
   if (sessionToggle) sessionToggle.addEventListener('change', e => updateSetting('session_mode', e.target.checked));
 
   document.getElementById('create-group-btn')?.addEventListener('click', createGroup);
+
+  document.getElementById('open-group-modal-btn')?.addEventListener('click', () => {
+    const overlay = document.getElementById('group-modal');
+    if (overlay) overlay.classList.add('open');
+    const memberList = document.getElementById('member-list');
+    if (memberList) {
+      memberList.innerHTML = '<div style="color:var(--text-3); font-size:13px; text-align:center;">Loading users...</div>';
+      apiGet(`${CHAT_API}/users`).then(r => r.json()).then(data => {
+        memberList.innerHTML = '';
+        data.users.forEach(u => {
+          if (u.id === currentUser.id) return;
+          const div = document.createElement('div');
+          div.className = 'member-item';
+          div.innerHTML = `<label for="chk-${u.id}">${escapeHtml(u.username)}</label>
+                           <input type="checkbox" id="chk-${u.id}" class="member-check" value="${u.id}">`;
+          memberList.appendChild(div);
+        });
+      }).catch(() => memberList.innerHTML = '<div style="color:var(--text-err); font-size:13px;">Error loading users</div>');
+    }
+  });
 
   // ── Theme toggle (C5) ────────────────────────────────────────
   const themeBtn = document.getElementById('theme-btn');

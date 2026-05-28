@@ -1,52 +1,40 @@
 """
-Security middleware — CSP headers, XSS hardening.
+Security middleware — injects HTTP security headers on every response.
+Converted from Flask after_request hook to a FastAPI ASGI middleware class.
 
-Why this fully mitigates XSS-based key exfiltration:
-  1. Content-Security-Policy blocks ALL inline scripts and eval().
-     Even if an attacker injects <script>...</script>, the browser
-     refuses to execute it (CSP violation).
-  2. script-src 'self' — only JS files served from our own origin run.
-     No CDN, no inline, no eval → injected scripts are dead on arrival.
-  3. Private keys in localStorage are encrypted (PBKDF2+AES-GCM). An
-     attacker reading localStorage gets only ciphertext — useless without
-     the in-memory password. But with CSP in place, no injected script
-     can read localStorage in the first place.
-  4. frame-ancestors 'none' blocks clickjacking.
-  5. X-Content-Type-Options prevents MIME-sniffing attacks.
+The Content-Security-Policy enforces that:
+  - Only our own JS files execute (script-src 'self')
+  - No inline scripts or eval() (default, no 'unsafe-inline' or 'unsafe-eval')
+  - No iframes (frame-ancestors 'none') — blocks clickjacking
+  - WebSocket connections to self allowed (connect-src 'self' ws: wss:)
 """
-from flask import request
-
+from starlette.middleware.base import BaseHTTPMiddleware
+from starlette.requests import Request
 
 CSP = (
     "default-src 'self'; "
-    "script-src 'self'; "                          # Only our own JS files
+    "script-src 'self'; "
     "style-src 'self' https://fonts.googleapis.com; "
     "font-src 'self' https://fonts.gstatic.com; "
-    "connect-src 'self' ws: wss:; "               # WebSocket allowed
+    "connect-src 'self' ws: wss:; "
     "img-src 'self' data:; "
-    "frame-ancestors 'none'; "                     # No iframes → anti-clickjack
-    "base-uri 'self'; "                            # Prevents base tag injection
-    "form-action 'self';"                          # Forms only submit to us
+    "frame-ancestors 'none'; "
+    "base-uri 'self'; "
+    "form-action 'self';"
 )
 
 
-def add_security_headers(response):
-    """Attach security headers to every response."""
-    response.headers['Content-Security-Policy']     = CSP
-    response.headers['X-Content-Type-Options']      = 'nosniff'
-    response.headers['X-Frame-Options']             = 'DENY'
-    # Modern browsers use CSP instead; setting to '0' disables the legacy
-    # XSS auditor which can itself be exploited.
-    response.headers['X-XSS-Protection']            = '0'
-    response.headers['Referrer-Policy']             = 'strict-origin-when-cross-origin'
-    response.headers['Permissions-Policy']          = 'geolocation=(), camera=(), microphone=()'
-    # Only send over HTTPS in production — Nginx handles this header in prod
-    if request.is_secure:
-        response.headers['Strict-Transport-Security'] = (
-            'max-age=63072000; includeSubDomains; preload'
-        )
-    return response
-
-
-def init_security(app):
-    app.after_request(add_security_headers)
+class SecurityHeadersMiddleware(BaseHTTPMiddleware):
+    async def dispatch(self, request: Request, call_next):
+        response = await call_next(request)
+        response.headers['Content-Security-Policy']  = CSP
+        response.headers['X-Content-Type-Options']   = 'nosniff'
+        response.headers['X-Frame-Options']          = 'DENY'
+        response.headers['X-XSS-Protection']         = '0'
+        response.headers['Referrer-Policy']          = 'strict-origin-when-cross-origin'
+        response.headers['Permissions-Policy']       = 'geolocation=(), camera=(), microphone=()'
+        if request.url.scheme == 'https':
+            response.headers['Strict-Transport-Security'] = (
+                'max-age=63072000; includeSubDomains; preload'
+            )
+        return response

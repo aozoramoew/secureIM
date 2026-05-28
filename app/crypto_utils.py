@@ -1,8 +1,8 @@
 """
-Server-side cryptographic utilities.
-Client-side crypto (ECDH, AES-GCM, HMAC) lives in static/js/crypto.js.
-This module handles: Argon2id password hashing, JWT token management,
-secure random token generation.
+Server-side cryptographic utilities — framework agnostic.
+Handles: Argon2id password hashing, JWT token management,
+secure random token generation, key fingerprinting.
+Client-side E2EE (ECDH, AES-GCM, HMAC) lives in static/js/crypto.js.
 """
 import secrets
 import hashlib
@@ -11,9 +11,10 @@ from datetime import datetime, timezone
 import jwt
 from argon2 import PasswordHasher
 from argon2.exceptions import VerifyMismatchError, VerificationError, InvalidHashError
-from flask import current_app
 
-# Argon2id — OWASP recommended parameters (m=64MB, t=3 iterations, p=4 lanes)
+from config import settings
+
+# Argon2id — OWASP recommended parameters (m=64 MB, t=3, p=4)
 _ph = PasswordHasher(
     time_cost=3,
     memory_cost=65536,
@@ -23,7 +24,7 @@ _ph = PasswordHasher(
 )
 
 
-# ── Password ─────────────────────────────────
+# ── Password ──────────────────────────────────────────────────────
 
 def hash_password(password: str) -> str:
     """Return argon2id hash of password."""
@@ -42,18 +43,18 @@ def needs_rehash(hashed: str) -> bool:
     return _ph.check_needs_rehash(hashed)
 
 
-# ── JWT ──────────────────────────────────────
+# ── JWT ───────────────────────────────────────────────────────────
 
 def generate_jwt(user_id: int, device_id: str) -> str:
     """Generate a signed JWT for a given user/device pair."""
-    expiry = datetime.now(tz=timezone.utc) + current_app.config['JWT_EXPIRY']
+    expiry = datetime.now(tz=timezone.utc) + settings.JWT_EXPIRY
     payload = {
         'sub':       str(user_id),
         'device_id': device_id,
         'exp':       expiry,
         'iat':       datetime.now(tz=timezone.utc),
     }
-    return jwt.encode(payload, current_app.config['JWT_SECRET_KEY'], algorithm='HS256')
+    return jwt.encode(payload, settings.JWT_SECRET_KEY, algorithm='HS256')
 
 
 def decode_jwt(token: str) -> dict | None:
@@ -61,14 +62,14 @@ def decode_jwt(token: str) -> dict | None:
     try:
         return jwt.decode(
             token,
-            current_app.config['JWT_SECRET_KEY'],
+            settings.JWT_SECRET_KEY,
             algorithms=['HS256'],
         )
     except jwt.PyJWTError:
         return None
 
 
-# ── Secure Tokens ─────────────────────────────
+# ── Secure Tokens ─────────────────────────────────────────────────
 
 def generate_secure_token(length: int = 48) -> str:
     """Generate a URL-safe random token (hex string)."""

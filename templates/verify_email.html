@@ -1,14 +1,74 @@
-{% extends "base.html" %}
-{% block title %}Email Verified — SecureIM{% endblock %}
-{% block body %}
-<main class="verify-page">
-  <div class="verify-card">
-    <div class="verify-icon">✅</div>
-    <h1 style="font-size:22px;margin-bottom:8px;">Email Verified!</h1>
-    <p style="color:var(--text-muted);margin-bottom:24px;">
-      Your account is now active. You can close this tab and sign in.
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Verify Email — SecureIM</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;600;700&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="/static/css/style.css">
+</head>
+<body>
+<div class="mesh-bg"></div>
+<div class="auth-page">
+  <div class="auth-card glass-card" style="text-align:center; max-width:420px;">
+    <div style="font-size:56px; margin-bottom:20px;">📧</div>
+    <h1 class="auth-title">Verify your email</h1>
+    <p class="auth-subtitle" style="margin-bottom:28px; line-height:1.7;">
+      Enter your email to request a new verification link.
     </p>
-    <a href="/login" class="btn btn-primary" style="display:inline-flex;width:auto;">Go to Sign In</a>
+    <form id="verify-resend-form" novalidate>
+      <div class="field" style="text-align:left;">
+        <label for="verify-email-input">Email</label>
+        <input type="email" id="verify-email-input" placeholder="your@email.com" required>
+      </div>
+      <div id="verify-status" class="status-msg"></div>
+      <button type="submit" id="verify-resend-btn" class="btn btn-primary btn-mt">
+        <span class="btn-text">Send Verification Email</span>
+      </button>
+    </form>
+    <div class="auth-footer" style="margin-top:20px;">
+      <a href="/login">← Back to login</a>
+    </div>
   </div>
-</main>
-{% endblock %}
+</div>
+<script src="/static/js/crypto.js"></script>
+<script src="/static/js/storage.js"></script>
+<script>
+document.addEventListener('DOMContentLoaded', () => {
+  const form = document.getElementById('verify-resend-form');
+  const status = document.getElementById('verify-status');
+  form.addEventListener('submit', async (e) => {
+    e.preventDefault();
+    const email = document.getElementById('verify-email-input').value.trim();
+    const btn = document.getElementById('verify-resend-btn');
+    btn.disabled = true;
+    btn.querySelector('.btn-text').textContent = 'Sending…';
+    try {
+      const res = await fetch('/api/auth/resend-verification', {
+        method:'POST', headers:{'Content-Type':'application/json'},
+        body: JSON.stringify({email})
+      });
+      const data = await res.json();
+      if (res.ok) {
+        status.textContent = '✅ ' + data.message;
+        status.className = 'status-msg status-success';
+      } else {
+        status.textContent = '❌ ' + (data.detail || 'Failed');
+        status.className = 'status-msg status-error';
+      }
+      status.style.display = 'block';
+    } catch { 
+      status.textContent = '❌ Network error'; 
+      status.className = 'status-msg status-error';
+      status.style.display = 'block';
+    } finally {
+      btn.disabled = false;
+      btn.querySelector('.btn-text').textContent = 'Send Verification Email';
+    }
+  });
+});
+</script>
+</body>
+</html>

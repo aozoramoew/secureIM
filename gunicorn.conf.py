@@ -8,7 +8,7 @@ import multiprocessing, os
 
 bind             = f"0.0.0.0:{os.environ.get('PORT', 5000)}"
 workers          = 1          # Socket.IO requires 1 worker per process (or Redis adapter)
-worker_class     = "geventwebsocket.gunicorn.workers.GeventWebSocketWorker"
+worker_class     = "uvicorn.workers.UvicornWorker"
 worker_connections = 1000
 timeout          = 120
 keepalive        = 5

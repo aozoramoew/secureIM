@@ -30,7 +30,7 @@ import urllib.request
 import urllib.error
 from datetime import datetime
 
-BASE_URL = sys.argv[1].rstrip('/') if len(sys.argv) > 1 else 'http://localhost:5000'
+BASE_URL = sys.argv[1].rstrip('/') if len(sys.argv) > 1 else 'http://localhost:8000'
 
 # ── ANSI Colors ──────────────────────────────────────────────────────
 GREEN  = '\033[92m'

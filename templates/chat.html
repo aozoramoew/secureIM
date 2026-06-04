@@ -101,7 +101,7 @@
     </div>
 
     <!-- Active conversation -->
-    <div id="chat-main" style="display:none; flex:1; flex-direction:column; overflow:hidden;">
+    <div id="chat-main" style="display:none;">
       <!-- Connection banner -->
       <div id="conn-banner"></div>
 
@@ -121,10 +121,29 @@
       <!-- Typing indicator -->
       <div id="typing-indicator">✏️ typing…</div>
 
+      <!-- Media Preview Area -->
+      <div id="media-preview" class="media-preview" style="display: none;">
+        <div class="media-preview-content">
+          <img id="media-preview-img" src="" alt="preview" style="display: none;">
+          <video id="media-preview-video" src="" style="display: none;" controls></video>
+          <button id="media-preview-close" class="media-preview-close" title="Remove attachment">✕</button>
+        </div>
+      </div>
+
       <!-- Input bar -->
       <div class="chat-input-bar">
+        <button id="attach-btn" class="icon-btn input-icon-btn" title="Attach image or video">📎</button>
+        <input type="file" id="file-input" accept="image/*,video/*" style="display: none;">
+
         <div class="input-wrap">
+          <!-- Emoji Picker Panel -->
+          <div id="emoji-picker" class="emoji-picker" style="display: none;">
+            <div class="emoji-picker-header">Emojis</div>
+            <div class="emoji-grid" id="emoji-grid"></div>
+          </div>
+          
           <textarea id="message-input" placeholder="Send an encrypted message…" rows="1"></textarea>
+          <button id="emoji-btn" class="icon-btn emoji-btn" title="Emojis">😊</button>
         </div>
         <select id="timer-select" class="timer-select" title="Self-destruct timer">
           <option value="0">No timer</option>

@@ -512,6 +512,10 @@ html, body {
   flex: 1; display: flex; flex-direction: column; min-width: 0;
   position: relative;
 }
+#chat-main {
+  flex: 1; flex-direction: column; overflow: hidden;
+  /* display: flex is set via JS when active */
+}
 
 /* Connection banner */
 #conn-banner {
@@ -623,6 +627,15 @@ html, body {
 }
 .msg-body.deleted-msg { color: var(--text-3); font-style: italic; font-size: 13px; }
 
+.msg-media {
+  max-width: 100%; max-height: 300px; border-radius: 8px; margin-bottom: 6px;
+  display: block; object-fit: contain; background: rgba(0,0,0,0.2);
+}
+.msg-media-video {
+  max-width: 100%; max-height: 300px; border-radius: 8px; margin-bottom: 6px;
+  display: block; background: #000;
+}
+
 .msg-meta {
   display: flex; align-items: center; gap: 5px;
   margin-top: 4px; justify-content: flex-end;
@@ -662,14 +675,79 @@ html, body {
 .delete-menu button:hover { background: rgba(255,255,255,0.06); }
 
 /* ── Chat Input Bar ───────────────────────────────────────────── */
+.media-preview {
+  padding: 10px 20px 0;
+  display: flex;
+}
+.media-preview-content {
+  position: relative; border-radius: 8px; overflow: hidden;
+  border: 1px solid var(--border); max-width: 80px; max-height: 80px;
+  background: rgba(0,0,0,0.2); display: flex; align-items: center; justify-content: center;
+}
+.media-preview-content img, .media-preview-content video {
+  display: block; max-width: 100%; max-height: 100%; object-fit: cover;
+}
+.media-preview-close {
+  position: absolute; top: 4px; right: 4px;
+  width: 20px; height: 20px; border-radius: 50%;
+  background: rgba(0,0,0,0.6); color: #fff; border: none;
+  font-size: 10px; cursor: pointer;
+  display: flex; align-items: center; justify-content: center;
+  transition: var(--trans);
+}
+.media-preview-close:hover { background: rgba(248,113,113,0.9); }
+
 .chat-input-bar {
   padding: 14px 20px; border-top: 1px solid var(--border);
   background: var(--glass-2); backdrop-filter: var(--blur);
   display: flex; gap: 10px; align-items: flex-end; flex-shrink: 0;
 }
+
+.input-icon-btn {
+  width: 44px; height: 44px; border-radius: 12px;
+  background: rgba(255,255,255,0.04); border: 1px solid var(--border);
+  color: var(--text-2); font-size: 18px; cursor: pointer;
+  display: flex; align-items: center; justify-content: center;
+  transition: var(--trans); flex-shrink: 0;
+}
+.input-icon-btn:hover { background: rgba(255,255,255,0.1); color: var(--text); }
+
 .input-wrap { flex: 1; position: relative; }
+
+.emoji-btn {
+  position: absolute; right: 8px; top: 50%; transform: translateY(-50%);
+  width: 32px; height: 32px; font-size: 18px;
+  background: transparent; border: none; cursor: pointer;
+  opacity: 0.7; transition: var(--trans);
+  display: flex; align-items: center; justify-content: center;
+}
+.emoji-btn:hover { opacity: 1; transform: translateY(-50%) scale(1.1); }
+
+.emoji-picker {
+  position: absolute; bottom: calc(100% + 14px); right: 0;
+  width: 320px; background: var(--bg-3);
+  border: 1px solid var(--border); border-radius: var(--radius);
+  box-shadow: var(--shadow); z-index: 100;
+  display: flex; flex-direction: column; overflow: hidden;
+  animation: slideUp 0.2s cubic-bezier(0.16,1,0.3,1) both;
+}
+.emoji-picker-header {
+  padding: 10px 14px; border-bottom: 1px solid var(--border);
+  font-size: 12px; font-weight: 600; color: var(--text-3);
+  background: rgba(255,255,255,0.02);
+}
+.emoji-grid {
+  display: grid; grid-template-columns: repeat(8, 1fr);
+  gap: 4px; padding: 10px; max-height: 200px; overflow-y: auto;
+}
+.emoji-item {
+  font-size: 20px; text-align: center; cursor: pointer;
+  padding: 4px; border-radius: 6px; transition: var(--trans);
+}
+.emoji-item:hover { background: rgba(255,255,255,0.1); transform: scale(1.2); }
+
 #message-input {
-  width: 100%; padding: 11px 14px;
+  width: 100%; padding: 11px 44px 11px 14px;
   background: rgba(255,255,255,0.04);
   border: 1px solid var(--border);
   border-radius: var(--radius-sm);

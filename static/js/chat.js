@@ -190,10 +190,23 @@ async function onKeyRotationRequired(data) {
 
 // ── Send Message ─────────────────────────────────────────────────
 
+let currentAttachment = null;
+
+function clearAttachment() {
+  currentAttachment = null;
+  document.getElementById('file-input').value = '';
+  document.getElementById('media-preview').style.display = 'none';
+  document.getElementById('media-preview-img').style.display = 'none';
+  document.getElementById('media-preview-video').style.display = 'none';
+  document.getElementById('media-preview-img').src = '';
+  document.getElementById('media-preview-video').src = '';
+}
+
 async function sendMessage() {
   const input = document.getElementById('message-input');
   const text  = input.value.trim();
-  if (!text || !activeConversation) return;
+  if (!text && !currentAttachment) return;
+  if (!activeConversation) return;
 
   input.value = '';
   input.focus();
@@ -207,21 +220,32 @@ async function sendMessage() {
   try {
     // Get recipient device keys for multi-device E2EE
     let deviceMap = {};
+    const fileAttach = currentAttachment;
+    clearAttachment();
+
+    async function encryptPayload(devId) {
+      if (fileAttach) {
+        const payload = await SecureCrypto.encryptBinaryMessage(
+          sessionKeys.aesKey, sessionKeys.hmacKey, fileAttach.buffer, 
+          { filename: fileAttach.file.name, mime: fileAttach.file.type }
+        );
+        payload.content_type = 'media';
+        if (text) payload.caption = text;
+        return payload;
+      } else {
+        return await SecureCrypto.encryptMessage(sessionKeys.aesKey, sessionKeys.hmacKey, text);
+      }
+    }
+
     if (activeConversation.type === 'dm') {
       const keysRes = await apiGet(`${CHAT_API}/users/${activeConversation.username}/keys`);
       const { devices } = await keysRes.json();
       for (const dev of devices) {
-        const payload = await SecureCrypto.encryptMessage(
-          sessionKeys.aesKey, sessionKeys.hmacKey, text
-        );
-        deviceMap[dev.device_id] = payload;
+        deviceMap[dev.device_id] = await encryptPayload(dev.device_id);
       }
     } else {
       // Group: encrypt with group AES key for each member device
-      const payload = await SecureCrypto.encryptMessage(
-        sessionKeys.aesKey, sessionKeys.hmacKey, text
-      );
-      deviceMap['group'] = payload;
+      deviceMap['group'] = await encryptPayload('group');
     }
 
     // Self-destruct: read expires_seconds from the selector in the input bar
@@ -239,10 +263,20 @@ async function sendMessage() {
     // Optimistically render outgoing message
     const expiresAt = expiresSec ? new Date(Date.now() + expiresSec * 1000).toISOString() : null;
     const optimistic = {
-      id: Date.now(), sender_id: currentUser.id, plaintext: text,
+      id: Date.now(), sender_id: currentUser.id, plaintext: text || null,
       timestamp: new Date().toISOString(), is_deep_deleted: false,
       expires_at: expiresAt,
     };
+    
+    if (fileAttach) {
+      optimistic.content_type = 'media';
+      const blob = new Blob([fileAttach.buffer], { type: fileAttach.file.type });
+      optimistic.mediaUrl = URL.createObjectURL(blob);
+      optimistic.mediaType = fileAttach.file.type.startsWith('image') ? 'image' : 'video';
+      optimistic.mediaMime = fileAttach.file.type;
+      optimistic.mediaData = SecureCrypto.bufToB64(fileAttach.buffer);
+    }
+
     renderMessage(optimistic, true);
 
   } catch (err) {
@@ -262,18 +296,34 @@ async function onReceiveMessage(msg) {
   const myPayload = payloads[deviceId] || payloads['group'];
 
   let plaintext = null;
+  let mediaObj = {};
+
   if (myPayload && activeConversation?.sessionId) {
     const keys = SecureStorage.getSessionKeys(activeConversation.sessionId);
     if (keys?.aesKey) {
       try {
-        plaintext = await SecureCrypto.decryptMessage(keys.aesKey, keys.hmacKey, myPayload);
+        if (myPayload.content_type === 'media') {
+          const { metadata, fileBuffer } = await SecureCrypto.decryptBinaryMessage(keys.aesKey, keys.hmacKey, myPayload);
+          const blob = new Blob([fileBuffer], { type: metadata.mime });
+          mediaObj = {
+            content_type: 'media',
+            mediaUrl: URL.createObjectURL(blob),
+            mediaType: metadata.mime.startsWith('image') ? 'image' : 'video',
+            mediaMime: metadata.mime,
+            mediaData: SecureCrypto.bufToB64(fileBuffer),
+            plaintext: myPayload.caption || null
+          };
+        } else {
+          plaintext = await SecureCrypto.decryptMessage(keys.aesKey, keys.hmacKey, myPayload);
+        }
       } catch (e) {
         plaintext = '⚠️ [HMAC verification failed — message may be tampered]';
       }
     }
   }
 
-  const enriched = { ...msg, plaintext };
+  const enriched = { ...msg, ...mediaObj };
+  if (!mediaObj.content_type) enriched.plaintext = plaintext;
 
   if (isForActiveConversation) {
     if (msg.sender_id !== currentUser.id) {
@@ -402,11 +452,42 @@ function buildMessageEl(msg, isMine) {
   const bubble = document.createElement('div');
   bubble.className = 'msg-bubble';
 
+  // Restore media URL from base64 data if missing
+  if (msg.content_type === 'media') {
+    if (!msg.mediaUrl && msg.mediaData) {
+      const buf = SecureCrypto.b64ToBuf(msg.mediaData);
+      const blob = new Blob([buf], { type: msg.mediaMime });
+      msg.mediaUrl = URL.createObjectURL(blob);
+    }
+    
+    if (msg.mediaUrl) {
+      if (msg.mediaType === 'image') {
+        const img = document.createElement('img');
+        img.className = 'msg-media';
+        img.src = msg.mediaUrl;
+        bubble.appendChild(img);
+      } else if (msg.mediaType === 'video') {
+        const vid = document.createElement('video');
+        vid.className = 'msg-media-video';
+        vid.src = msg.mediaUrl;
+        vid.controls = true;
+        bubble.appendChild(vid);
+      }
+    }
+  }
+
   // Message body — textContent is XSS-safe
-  const body = document.createElement('div');
-  body.className   = 'msg-body';
-  body.textContent = msg.plaintext ?? '🔒 [Encrypted]';
-  bubble.appendChild(body);
+  if (msg.plaintext) {
+    const body = document.createElement('div');
+    body.className   = 'msg-body';
+    body.textContent = msg.plaintext;
+    bubble.appendChild(body);
+  } else if (!msg.content_type) {
+    const body = document.createElement('div');
+    body.className   = 'msg-body';
+    body.textContent = '🔒 [Encrypted]';
+    bubble.appendChild(body);
+  }
 
   // Meta row
   const meta = document.createElement('div');
@@ -753,6 +834,71 @@ document.addEventListener('DOMContentLoaded', () => {
   document.getElementById('send-btn')?.addEventListener('click', sendMessage);
   document.getElementById('search-input')?.addEventListener('input', onSearch);
   document.getElementById('logout-btn')?.addEventListener('click', logout);
+
+  // ── Emojis ──────────────────────────────────────────────────
+  const EMOJIS = ['😀','😃','😄','😁','😆','😅','😂','🤣','🥲','☺️','😊','😇','🙂','🙃','😉','😌','😍','🥰','😘','😗','😙','😚','😋','😛','😝','😜','🤪','🤨','🧐','🤓','😎','🥸','🤩','🥳','😏','😒','😞','😔','😟','😕','🙁','☹️','😣','😖','😫','😩','🥺','😢','😭','😤','😠','😡','🤬','🤯','😳','🥵','🥶','😱','😨','😰','😥','😓','🤗','🤔','🤭','🤫','🤥','😶','😐','😑','😬','🙄','😯','😦','😧','😮','😲','🥱','😴','🤤','😪','😵','🤐','🥴','🤢','🤮','🤧','😷','🤒','🤕','🤑','🤠','😈','👿','👹','👺','🤡','💩','👻','💀','☠️','👽','👾','🤖','🎃','😺','😸','😹','😻','😼','😽','🙀','😿','😾'];
+
+  const emojiGrid = document.getElementById('emoji-grid');
+  if (emojiGrid) {
+    EMOJIS.forEach(emo => {
+      const el = document.createElement('div');
+      el.className = 'emoji-item';
+      el.textContent = emo;
+      el.onclick = () => {
+        const inp = document.getElementById('message-input');
+        inp.value += emo;
+        inp.focus();
+      };
+      emojiGrid.appendChild(el);
+    });
+  }
+
+  const emojiBtn = document.getElementById('emoji-btn');
+  const emojiPicker = document.getElementById('emoji-picker');
+  if (emojiBtn && emojiPicker) {
+    emojiBtn.addEventListener('click', () => {
+      emojiPicker.style.display = emojiPicker.style.display === 'none' ? 'flex' : 'none';
+    });
+    document.addEventListener('click', e => {
+      if (!emojiPicker.contains(e.target) && !emojiBtn.contains(e.target)) {
+        emojiPicker.style.display = 'none';
+      }
+    });
+  }
+
+  // ── Attachments ────────────────────────────────────────────
+  const attachBtn = document.getElementById('attach-btn');
+  const fileInput = document.getElementById('file-input');
+  const previewBox = document.getElementById('media-preview');
+  const previewImg = document.getElementById('media-preview-img');
+  const previewVid = document.getElementById('media-preview-video');
+  const previewClose = document.getElementById('media-preview-close');
+
+  if (attachBtn && fileInput) {
+    attachBtn.addEventListener('click', () => fileInput.click());
+    fileInput.addEventListener('change', async (e) => {
+      const file = e.target.files[0];
+      if (!file) return;
+      if (file.size > 5 * 1024 * 1024) {
+        showAlert('⚠️ File too large. Max 5MB allowed.', 'warning');
+        fileInput.value = '';
+        return;
+      }
+      const buffer = await file.arrayBuffer();
+      currentAttachment = { file, buffer };
+      
+      const isImg = file.type.startsWith('image');
+      previewImg.style.display = isImg ? 'block' : 'none';
+      previewVid.style.display = !isImg ? 'block' : 'none';
+      
+      const blobUrl = URL.createObjectURL(file);
+      if (isImg) previewImg.src = blobUrl;
+      else previewVid.src = blobUrl;
+      
+      previewBox.style.display = 'flex';
+    });
+    previewClose?.addEventListener('click', clearAttachment);
+  }
 
   const storeToggle = document.getElementById('toggle-store-history');
   if (storeToggle) storeToggle.addEventListener('change', e => updateSetting('store_history', e.target.checked));

@@ -253,6 +253,87 @@ const SecureCrypto = (() => {
     return u8ToStr(plaintextBuf);
   }
 
+  /**
+   * Encrypt a binary file with metadata (filename, mime type).
+   * Packs the metadata JSON length (4 bytes), metadata JSON, and raw file bytes together
+   * before encrypting with AES-GCM.
+   */
+  async function encryptBinaryMessage(aesKey, hmacKey, arrayBuffer, metadata) {
+    const nonce = crypto.getRandomValues(new Uint8Array(12));
+    const metaStr = JSON.stringify(metadata);
+    const metaBytes = strToU8(metaStr);
+    
+    // Format: [4 bytes metadata length] + [metadata bytes] + [file bytes]
+    const metaLen = new Uint32Array([metaBytes.length]);
+    const metaLenBytes = new Uint8Array(metaLen.buffer);
+    
+    const plaintext = new Uint8Array(4 + metaBytes.length + arrayBuffer.byteLength);
+    plaintext.set(metaLenBytes, 0);
+    plaintext.set(metaBytes, 4);
+    plaintext.set(new Uint8Array(arrayBuffer), 4 + metaBytes.length);
+
+    const ciphertextBuf = await crypto.subtle.encrypt(
+      { name: 'AES-GCM', iv: nonce },
+      aesKey,
+      plaintext
+    );
+
+    const hmacInput = new Uint8Array(nonce.length + ciphertextBuf.byteLength);
+    hmacInput.set(nonce, 0);
+    hmacInput.set(new Uint8Array(ciphertextBuf), nonce.length);
+
+    const hmacBuf = await crypto.subtle.sign('HMAC', hmacKey, hmacInput);
+
+    return {
+      ciphertext: bufToB64(ciphertextBuf),
+      nonce:      bufToB64(nonce),
+      hmac:       bufToB64(hmacBuf),
+    };
+  }
+
+  /**
+   * Decrypt a binary message and extract metadata and file bytes.
+   */
+  async function decryptBinaryMessage(aesKey, hmacKey, payload) {
+    const { ciphertext, nonce, hmac } = payload;
+    const nonceBuf      = new Uint8Array(b64ToBuf(nonce));
+    const ciphertextBuf = new Uint8Array(b64ToBuf(ciphertext));
+
+    const hmacInput = new Uint8Array(nonceBuf.length + ciphertextBuf.length);
+    hmacInput.set(nonceBuf, 0);
+    hmacInput.set(ciphertextBuf, nonceBuf.length);
+
+    const valid = await crypto.subtle.verify('HMAC', hmacKey, b64ToBuf(hmac), hmacInput);
+    if (!valid) {
+      throw new Error('HMAC verification failed — message may be tampered');
+    }
+
+    const plaintextBuf = await crypto.subtle.decrypt(
+      { name: 'AES-GCM', iv: nonceBuf },
+      aesKey,
+      ciphertextBuf
+    );
+
+    const plaintextBytes = new Uint8Array(plaintextBuf);
+    
+    // Extract metadata length
+    const metaLenBytes = new Uint8Array(4);
+    metaLenBytes.set(plaintextBytes.subarray(0, 4));
+    const metaLen = new Uint32Array(metaLenBytes.buffer)[0];
+    
+    // Extract metadata
+    const metaBytes = plaintextBytes.subarray(4, 4 + metaLen);
+    const metadata = JSON.parse(u8ToStr(metaBytes));
+    
+    // Extract file bytes
+    const fileBytes = plaintextBytes.subarray(4 + metaLen);
+    
+    return {
+      metadata,
+      fileBuffer: fileBytes.buffer
+    };
+  }
+
   // ── Local Storage Encryption (PBKDF2 + AES-256-GCM) ───────────
 
   /**
@@ -350,6 +431,8 @@ const SecureCrypto = (() => {
     // Message E2EE
     encryptMessage,
     decryptMessage,
+    encryptBinaryMessage,
+    decryptBinaryMessage,
 
     // Identity / signing
     signData,

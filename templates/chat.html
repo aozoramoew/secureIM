@@ -93,6 +93,9 @@
   <!-- MAIN AREA -->
   <div class="chat-main" id="chat-main-wrapper">
 
+    <!-- Connection banner - always visible at top -->
+    <div id="conn-banner"></div>
+
     <!-- No conversation selected -->
     <div class="no-chat-placeholder" id="no-chat-placeholder">
       <div class="placeholder-icon">🔒</div>
@@ -101,11 +104,8 @@
     </div>
 
     <!-- Active conversation -->
-    <div id="chat-main" style="display:none;">
-      <!-- Connection banner -->
-      <div id="conn-banner"></div>
+    <div id="chat-main" style="display:none; flex-direction:column; flex:1; overflow:hidden;">
 
-      <!-- Header -->
       <div class="chat-header">
         <div class="chat-header-avatar" id="chat-header-avatar">?</div>
         <div class="chat-header-info">

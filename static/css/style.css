@@ -510,19 +510,20 @@ html, body {
 /* ── Main Chat Area ───────────────────────────────────────────── */
 .chat-main {
   flex: 1; display: flex; flex-direction: column; min-width: 0;
-  position: relative;
+  position: relative; overflow: hidden;
 }
 #chat-main {
-  flex: 1; flex-direction: column; overflow: hidden;
-  /* display: flex is set via JS when active */
+  flex: 1;
+  /* display is toggled by JS: 'none' → 'flex' */
 }
 
 /* Connection banner */
 #conn-banner {
-  display: none; background: rgba(251,191,36,0.12);
+  background: rgba(251,191,36,0.12);
   border-bottom: 1px solid rgba(251,191,36,0.25);
   padding: 8px 20px; text-align: center;
   font-size: 12px; color: var(--text-warn);
+  display: none; /* shown via JS when disconnected */
 }
 
 /* Chat header */
@@ -685,7 +686,7 @@ html, body {
   background: rgba(0,0,0,0.2); display: flex; align-items: center; justify-content: center;
 }
 .media-preview-content img, .media-preview-content video {
-  display: block; max-width: 100%; max-height: 100%; object-fit: cover;
+  max-width: 100%; max-height: 100%; object-fit: cover;
 }
 .media-preview-close {
   position: absolute; top: 4px; right: 4px;
@@ -758,6 +759,9 @@ html, body {
 }
 #message-input:focus { border-color: var(--cyan); background: rgba(0,212,255,0.04); box-shadow: 0 0 0 3px var(--cyan-dim); }
 #message-input::placeholder { color: var(--text-3); }
+
+#file-input { display: none !important; }
+
 .timer-select {
   appearance: none;
   padding: 6px 10px; background: rgba(255,255,255,0.04);

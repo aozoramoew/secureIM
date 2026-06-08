@@ -56,11 +56,22 @@ function promptPassword() {
 // ── SocketIO ─────────────────────────────────────────────────────
 
 function connectSocket(token) {
-  socket = io({ auth: { token } });
+  socket = io({
+    auth: { token },
+    reconnection: true,
+    reconnectionDelay: 1000,
+    reconnectionAttempts: 10,
+  });
 
-  socket.on('connect', () => console.log('🔌 Connected'));
+  socket.on('connect', () => {
+    console.log('🔌 Connected');
+    showConnectionBanner(true);
+  });
   socket.on('disconnect', () => showConnectionBanner(false));
-  socket.on('connect_error', () => showConnectionBanner(false));
+  socket.on('connect_error', (err) => {
+    console.error('Socket connect error:', err.message);
+    showConnectionBanner(false);
+  });
 
   socket.on('user_online',  d => updateUserStatus(d.user_id, true));
   socket.on('user_offline', d => updateUserStatus(d.user_id, false));
@@ -243,6 +254,15 @@ async function sendMessage() {
       for (const dev of devices) {
         deviceMap[dev.device_id] = await encryptPayload(dev.device_id);
       }
+      
+      // Also encrypt for our own devices so we can read our own message history
+      const myKeysRes = await apiGet(`${CHAT_API}/users/${currentUser.username}/keys`);
+      const myKeysBody = await myKeysRes.json();
+      for (const dev of myKeysBody.devices) {
+        if (!deviceMap[dev.device_id]) {
+          deviceMap[dev.device_id] = await encryptPayload(dev.device_id);
+        }
+      }
     } else {
       // Group: encrypt with group AES key for each member device
       deviceMap['group'] = await encryptPayload('group');
@@ -298,8 +318,10 @@ async function onReceiveMessage(msg) {
   let plaintext = null;
   let mediaObj = {};
 
-  if (myPayload && activeConversation?.sessionId) {
-    const keys = SecureStorage.getSessionKeys(activeConversation.sessionId);
+  const sessionId = msg.session_id || activeConversation?.sessionId;
+
+  if (myPayload && sessionId) {
+    const keys = SecureStorage.getSessionKeys(sessionId);
     if (keys?.aesKey) {
       try {
         if (myPayload.content_type === 'media') {
@@ -325,16 +347,17 @@ async function onReceiveMessage(msg) {
   const enriched = { ...msg, ...mediaObj };
   if (!mediaObj.content_type) enriched.plaintext = plaintext;
 
-  if (isForActiveConversation) {
-    if (msg.sender_id !== currentUser.id) {
-      renderMessage(enriched, false);
-    }
-    if (currentPassword) {
-      const convId = activeConversation.type === 'dm'
-        ? `dm_${Math.min(currentUser.id, msg.sender_id)}_${Math.max(currentUser.id, msg.sender_id)}`
-        : `grp_${msg.group_id}`;
-      await SecureStorage.saveMessage(currentPassword, convId, enriched);
-    }
+  if (isForActiveConversation && msg.sender_id !== currentUser.id) {
+    renderMessage(enriched, false);
+  }
+
+  // Always save received messages to local storage, even if inactive
+  if (currentPassword) {
+    const otherId = msg.sender_id === currentUser.id ? msg.recipient_id : msg.sender_id;
+    const convId = msg.group_id
+      ? `grp_${msg.group_id}`
+      : `dm_${Math.min(currentUser.id, otherId)}_${Math.max(currentUser.id, otherId)}`;
+    await SecureStorage.saveMessage(currentPassword, convId, enriched);
   }
 
   // Update sidebar unread badge
@@ -592,44 +615,65 @@ function escapeHtml(s) {
 // ── User / Group Lists ────────────────────────────────────────────
 
 async function loadUserList(q = '') {
-  const res = await apiGet(`${CHAT_API}/users?q=${encodeURIComponent(q)}`);
-  const { users } = await res.json();
-  const list = document.getElementById('contacts-list');
-  list.innerHTML = '';
-  users.forEach(u => {
-    const li = document.createElement('li');
-    li.className = 'contact-item';
-    li.setAttribute('data-user-id', u.id);
-    li.innerHTML = `
-      <div class="contact-avatar">${u.username[0].toUpperCase()}
-        <span class="online-dot ${u.is_online ? 'online' : 'offline'}"></span>
-      </div>
-      <div class="contact-info">
-        <span class="contact-name">${escapeHtml(u.username)}</span>
-        ${u.is_verified_by_me ? '<span class="verified-badge" title="Public key verified out-of-band">✅ Verified</span>' : ''}
-      </div>
-      <span class="unread-badge"></span>`;
-    li.addEventListener('click', () => openDM(u.id, u.username));
-    list.appendChild(li);
-  });
+  try {
+    const res = await apiGet(`${CHAT_API}/users?q=${encodeURIComponent(q)}`);
+    if (!res.ok) {
+      console.error('[loadUserList] API error', res.status);
+      return;
+    }
+    const { users } = await res.json();
+    const list = document.getElementById('contacts-list');
+    list.innerHTML = '';
+    if (!users || users.length === 0) {
+      const empty = document.createElement('li');
+      empty.style.cssText = 'padding:12px 16px; color:var(--text-3); font-size:12px; text-align:center;';
+      empty.textContent = q ? 'No results found' : 'No other users yet';
+      list.appendChild(empty);
+      return;
+    }
+    users.forEach(u => {
+      const li = document.createElement('li');
+      li.className = 'contact-item';
+      li.setAttribute('data-user-id', u.id);
+      li.innerHTML = `
+        <div class="contact-avatar">${u.username[0].toUpperCase()}
+          <span class="online-dot ${u.is_online ? 'online' : 'offline'}"></span>
+        </div>
+        <div class="contact-info">
+          <span class="contact-name">${escapeHtml(u.username)}</span>
+          ${u.is_verified_by_me ? '<span class="verified-badge" title="Public key verified out-of-band">✅ Verified</span>' : ''}
+        </div>
+        <span class="unread-badge"></span>`;
+      li.addEventListener('click', () => openDM(u.id, u.username));
+      list.appendChild(li);
+    });
+  } catch (err) {
+    console.error('[loadUserList] Error:', err);
+  }
 }
 
 async function loadGroups() {
-  const res = await apiGet(`${CHAT_API}/groups`);
-  const { groups } = await res.json();
-  const list = document.getElementById('groups-list');
-  if (!list) return;
-  list.innerHTML = '';
-  groups.forEach(g => {
-    const li = document.createElement('li');
-    li.className = 'contact-item';
-    li.setAttribute('data-group-id', g.id);
-    li.innerHTML = `<div class="contact-avatar group-avatar">#</div>
-      <div class="contact-info"><span class="contact-name">${escapeHtml(g.name)}</span></div>
-      <span class="unread-badge"></span>`;
-    li.onclick = () => openGroup(g.id, g.name);
-    list.appendChild(li);
-  });
+  try {
+    const res = await apiGet(`${CHAT_API}/groups`);
+    if (!res.ok) { console.error('[loadGroups] API error', res.status); return; }
+    const { groups } = await res.json();
+    const list = document.getElementById('groups-list');
+    if (!list) return;
+    list.innerHTML = '';
+    if (!groups || groups.length === 0) return;
+    groups.forEach(g => {
+      const li = document.createElement('li');
+      li.className = 'contact-item';
+      li.setAttribute('data-group-id', g.id);
+      li.innerHTML = `<div class="contact-avatar group-avatar">#</div>
+        <div class="contact-info"><span class="contact-name">${escapeHtml(g.name)}</span></div>
+        <span class="unread-badge"></span>`;
+      li.onclick = () => openGroup(g.id, g.name);
+      list.appendChild(li);
+    });
+  } catch (err) {
+    console.error('[loadGroups] Error:', err);
+  }
 }
 
 // ── Group Creation ───────────────────────────────────────────────
@@ -856,7 +900,8 @@ document.addEventListener('DOMContentLoaded', () => {
   const emojiBtn = document.getElementById('emoji-btn');
   const emojiPicker = document.getElementById('emoji-picker');
   if (emojiBtn && emojiPicker) {
-    emojiBtn.addEventListener('click', () => {
+    emojiBtn.addEventListener('click', (e) => {
+      e.stopPropagation();
       emojiPicker.style.display = emojiPicker.style.display === 'none' ? 'flex' : 'none';
     });
     document.addEventListener('click', e => {

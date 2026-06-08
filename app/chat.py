@@ -151,6 +151,7 @@ async def send_message(sid, data):
 
             msg_dict = msg.to_dict(requesting_user_id=sender.id)
             msg_dict['sender_username'] = sender.username
+            msg_dict['session_id'] = f"grp_{group_id}"
 
             for gm in db.query(GroupMember).filter_by(group_id=group_id).all():
                 await _emit_to_user(gm.user_id, 'receive_message', msg_dict)
@@ -183,6 +184,7 @@ async def send_message(sid, data):
 
             msg_dict = msg.to_dict(requesting_user_id=sender.id)
             msg_dict['sender_username'] = sender.username
+            msg_dict['session_id'] = session_id
 
             await _emit_to_user(sender.id,    'receive_message', msg_dict)
             await _emit_to_user(recipient_id, 'receive_message', msg_dict)
@@ -258,7 +260,6 @@ def list_users(
     current_user, _ = auth
     query = db.query(User).filter(
         User.id != current_user.id,
-        User.is_email_verified == True,  # noqa: E712
     )
     if q:
         query = query.filter(User.username.ilike(f'%{q}%'))

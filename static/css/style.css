@@ -513,8 +513,13 @@ html, body {
   position: relative; overflow: hidden;
 }
 #chat-main {
+  /* CSP blocks the inline `style` attribute that used to carry these —
+     defined here instead. JS only ever toggles `display` (none ↔ flex),
+     which is a direct DOM property write and isn't affected by CSP. */
+  display: none;
   flex: 1;
-  /* display is toggled by JS: 'none' → 'flex' */
+  flex-direction: column;
+  overflow: hidden;
 }
 
 /* Connection banner */
@@ -678,9 +683,16 @@ html, body {
 .delete-menu button:hover { background: rgba(255,255,255,0.06); }
 
 /* ── Chat Input Bar ───────────────────────────────────────────── */
+/* CSP blocks the inline `style="display:none"` these elements carry in
+   the markup, so the hidden-by-default state must live here instead.
+   JS toggles `.style.display` directly (a DOM write, not an inline
+   attribute), which CSP does not affect. */
+#media-preview, #media-preview-img, #media-preview-video,
+#file-input, #emoji-picker {
+  display: none;
+}
 .media-preview {
   padding: 10px 20px 0;
-  display: flex;
 }
 .media-preview-content {
   position: relative; border-radius: 8px; overflow: hidden;
@@ -829,6 +841,11 @@ html, body {
   box-shadow: var(--shadow-cyan), var(--shadow);
   animation: slideUp 0.4s cubic-bezier(0.16,1,0.3,1) both;
 }
+/* CSP forbids inline `style` attributes — these mirror what used to be
+   inline-styled on the unlock card markup. */
+.unlock-card .auth-logo  { margin-bottom: 24px; }
+.unlock-card h2          { font-size: 18px; margin-bottom: 8px; font-weight: 700; }
+.unlock-card p           { color: var(--text-2); font-size: 13px; margin-bottom: 20px; line-height: 1.6; }
 
 /* ── Group Modal ──────────────────────────────────────────────── */
 .modal-overlay {

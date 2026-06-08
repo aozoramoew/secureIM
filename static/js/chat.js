@@ -21,14 +21,22 @@ async function initChat() {
   currentUser  = SecureStorage.getUser();
   if (!token || !currentUser) { window.location.href = '/login'; return; }
 
-  // Prompt for password to unlock local keys
-  currentPassword = await promptPassword();
-  if (!currentPassword) { logout(); return; }
-
-  const keys = await SecureStorage.loadIdentityKeys(currentPassword);
-  if (!keys) {
-    showAlert('❌ Wrong password. Could not unlock local keys.', 'error');
-    logout(); return;
+  // Prompt for password to unlock local keys. A mistyped password must NOT
+  // wipe local storage — it's the only copy of the private key and message
+  // history (E2EE: nothing usable is stored server-side), so we just let the
+  // user retry instead of calling the destructive logout().
+  let keys = null;
+  while (!keys) {
+    currentPassword = await promptPassword();
+    if (!currentPassword) {
+      showAlert('🔒 Enter your password to unlock your keys.', 'warning');
+      continue;
+    }
+    keys = await SecureStorage.loadIdentityKeys(currentPassword);
+    if (!keys) {
+      showAlert('❌ Wrong password. Please try again.', 'error');
+      currentPassword = null;
+    }
   }
 
   myEcdhPrivKey  = await SecureCrypto.importPrivateECDH(keys.ecdhPrivJwk);
@@ -47,13 +55,20 @@ async function initChat() {
 
 function promptPassword() {
   return new Promise(resolve => {
-    const overlay = document.getElementById('unlock-overlay');
+    const overlay  = document.getElementById('unlock-overlay');
+    const input    = document.getElementById('unlock-password');
     overlay.style.display = 'flex';
-    document.getElementById('unlock-btn').onclick = () => {
-      const pwd = document.getElementById('unlock-password').value;
+    input.value = '';
+    input.focus();
+    const submit = () => {
+      const pwd = input.value;
       overlay.style.display = 'none';
+      input.removeEventListener('keydown', onKeydown);
       resolve(pwd);
     };
+    const onKeydown = (e) => { if (e.key === 'Enter') submit(); };
+    input.addEventListener('keydown', onKeydown);
+    document.getElementById('unlock-btn').onclick = submit;
   });
 }
 
@@ -417,6 +432,7 @@ function onMessageRead(data) {
 
 async function openDM(userId, username) {
   clearMessages();
+  clearAttachment();
   activeConversation = { type: 'dm', id: userId, username, name: username, sessionId: null };
   document.getElementById('chat-header-name').textContent = username;
   const avatarEl = document.getElementById('chat-header-avatar');
@@ -446,6 +462,7 @@ async function openDM(userId, username) {
 
 async function openGroup(groupId, groupName) {
   clearMessages();
+  clearAttachment();
   activeConversation = { type: 'group', id: groupId, name: groupName, sessionId: `grp_${groupId}` };
   document.getElementById('chat-header-name').textContent = '# ' + groupName;
   const avatarEl = document.getElementById('chat-header-avatar');

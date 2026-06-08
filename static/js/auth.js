@@ -382,22 +382,26 @@ function showDevEmailModal(entry) {
       <div class="dev-modal-actions">
         <a href="${entry.link}" target="_blank" class="btn btn-primary btn-sm"
            style="width:auto;text-decoration:none;">✅ Open Link</a>
-        <button id="dev-copy-btn" class="btn btn-secondary btn-sm" style="width:auto;"
-          onclick="navigator.clipboard.writeText('${entry.link}');this.textContent='✓ Copied!';setTimeout(()=>this.textContent='📋 Copy',1500);">
+        <button id="dev-copy-btn" class="btn btn-secondary btn-sm" style="width:auto;">
           📋 Copy
         </button>
-        <button class="btn btn-ghost btn-sm" style="width:auto;"
-          onclick="openDevLinks();">
+        <button id="dev-all-links-btn" class="btn btn-ghost btn-sm" style="width:auto;">
           📬 All links
         </button>
-        <button class="btn btn-ghost btn-sm" style="width:auto; margin-left:auto;"
-          onclick="document.getElementById('dev-email-modal').remove();">
+        <button id="dev-close-btn" class="btn btn-ghost btn-sm" style="width:auto; margin-left:auto;">
           ✕ Close
         </button>
       </div>
     </div>
   `;
 
+  modal.querySelector('#dev-copy-btn').addEventListener('click', function () {
+    navigator.clipboard.writeText(entry.link);
+    this.textContent = '✓ Copied!';
+    setTimeout(() => { this.textContent = '📋 Copy'; }, 1500);
+  });
+  modal.querySelector('#dev-all-links-btn').addEventListener('click', () => openDevLinks());
+  modal.querySelector('#dev-close-btn').addEventListener('click', () => modal.remove());
   modal.addEventListener('click', (e) => { if (e.target === modal) modal.remove(); });
   document.body.appendChild(modal);
 }
@@ -442,8 +446,7 @@ async function openDevLinks() {
       <div class="dev-modal" style="max-width:640px;">
         <div class="dev-modal-header">
           <h2>🛠️ Dev Email Links (${links.length})</h2>
-          <button onclick="document.getElementById('dev-email-modal').remove();"
-                  class="btn btn-ghost btn-sm" style="width:auto;">✕ Close</button>
+          <button id="dev-close-btn" class="btn btn-ghost btn-sm" style="width:auto;">✕ Close</button>
         </div>
         <div style="max-height:60vh;overflow-y:auto;">
           ${links.length === 0
@@ -452,6 +455,7 @@ async function openDevLinks() {
         </div>
       </div>
     `;
+    modal.querySelector('#dev-close-btn').addEventListener('click', () => modal.remove());
     modal.addEventListener('click', (e) => { if (e.target === modal) modal.remove(); });
     document.body.appendChild(modal);
   } catch {

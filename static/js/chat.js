@@ -1045,6 +1045,7 @@ document.addEventListener('DOMContentLoaded', () => {
   if (sessionToggle) sessionToggle.addEventListener('change', e => updateSetting('session_mode', e.target.checked));
 
   document.getElementById('create-group-btn')?.addEventListener('click', createGroup);
+  document.getElementById('group-modal-close')?.addEventListener('click', () => closeModal('group-modal'));
 
   document.getElementById('open-group-modal-btn')?.addEventListener('click', () => {
     const overlay = document.getElementById('group-modal');

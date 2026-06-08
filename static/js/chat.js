@@ -10,6 +10,10 @@ let activeConversation = null; // { type:'dm'|'group', id, sessionId, name }
 let myEcdhPrivKey = null;      // CryptoKey object (ECDH private, in-memory)
 let myEcdsaPrivKey = null;     // CryptoKey object (ECDSA private, in-memory)
 
+// FIFO queue of { tempId, convId } for optimistically-rendered outgoing messages
+// awaiting the server's `receive_message` echo, used to flip "sending" → "delivered".
+let _pendingOutgoing = [];
+
 // ── Bootstrap ────────────────────────────────────────────────────
 
 async function initChat() {
@@ -282,10 +286,11 @@ async function sendMessage() {
 
     // Optimistically render outgoing message
     const expiresAt = expiresSec ? new Date(Date.now() + expiresSec * 1000).toISOString() : null;
+    const tempId = Date.now();
     const optimistic = {
-      id: Date.now(), sender_id: currentUser.id, plaintext: text || null,
+      id: tempId, sender_id: currentUser.id, plaintext: text || null,
       timestamp: new Date().toISOString(), is_deep_deleted: false,
-      expires_at: expiresAt,
+      expires_at: expiresAt, status: 'sending',
     };
     
     if (fileAttach) {
@@ -298,6 +303,7 @@ async function sendMessage() {
     }
 
     renderMessage(optimistic, true);
+    _pendingOutgoing.push({ tempId, convId: getActiveConvId() });
 
   } catch (err) {
     showAlert('❌ Failed to send: ' + err.message, 'error');
@@ -347,16 +353,18 @@ async function onReceiveMessage(msg) {
   const enriched = { ...msg, ...mediaObj };
   if (!mediaObj.content_type) enriched.plaintext = plaintext;
 
+  const convId = _convIdForMessage(msg);
+
   if (isForActiveConversation && msg.sender_id !== currentUser.id) {
     renderMessage(enriched, false);
+  } else if (msg.sender_id === currentUser.id) {
+    // This is the server's echo of our own message — flip its optimistic
+    // "sending" indicator to a real delivery receipt.
+    _reconcileOutgoing(convId, msg);
   }
 
   // Always save received messages to local storage, even if inactive
   if (currentPassword) {
-    const otherId = msg.sender_id === currentUser.id ? msg.recipient_id : msg.sender_id;
-    const convId = msg.group_id
-      ? `grp_${msg.group_id}`
-      : `dm_${Math.min(currentUser.id, otherId)}_${Math.max(currentUser.id, otherId)}`;
     await SecureStorage.saveMessage(currentPassword, convId, enriched);
   }
 
@@ -526,10 +534,16 @@ function buildMessageEl(msg, isMine) {
   // Read receipt (only on outgoing messages)
   if (isMine) {
     const receipt = document.createElement('span');
-    receipt.className   = 'msg-receipt';
-    receipt.title       = msg.delivered_at ? 'Delivered' : 'Sent';
-    receipt.textContent = msg.read_at ? '✓✓' : '✓';
-    if (msg.read_at) receipt.style.color = '#00d4ff';
+    receipt.className = 'msg-receipt';
+    if (msg.status === 'sending') {
+      receipt.classList.add('sending');
+      receipt.title       = 'Sending…';
+      receipt.textContent = '🕓';
+    } else {
+      receipt.title       = msg.read_at ? 'Read' : (msg.delivered_at ? 'Delivered' : 'Sent');
+      receipt.textContent = (msg.read_at || msg.delivered_at) ? '✓✓' : '✓';
+      if (msg.read_at) receipt.style.color = '#00d4ff';
+    }
     meta.append(timeEl, lockEl, receipt);
   } else {
     meta.append(timeEl, lockEl);
@@ -590,8 +604,27 @@ function buildMessageEl(msg, isMine) {
   return div;
 }
 
+/** Build a "Today" / "Wednesday, Jun 3" separator shown between days in the thread. */
+function buildDateSepEl(timestamp) {
+  const d = new Date(timestamp), now = new Date();
+  const label = d.toDateString() === now.toDateString()
+    ? 'Today'
+    : d.toLocaleDateString([], { weekday: 'long', month: 'short', day: 'numeric' });
+  const sep = document.createElement('div');
+  sep.className = 'date-sep';
+  sep.innerHTML = '<span class="date-sep-line"></span>' +
+    `<span class="date-sep-text">${escapeHtml(label)}</span>` +
+    '<span class="date-sep-line"></span>';
+  return sep;
+}
+
 function renderMessage(msg, isMine) {
   const container = document.getElementById('messages-container');
+  const day = new Date(msg.timestamp).toDateString();
+  if (container.dataset.lastDate !== day) {
+    container.appendChild(buildDateSepEl(msg.timestamp));
+    container.dataset.lastDate = day;
+  }
   container.appendChild(buildMessageEl(msg, isMine));
   container.scrollTop = container.scrollHeight;
 }
@@ -603,7 +636,7 @@ function showDeleteMenu(msgId) {
 
 function clearMessages() {
   const c = document.getElementById('messages-container');
-  if (c) c.innerHTML = '';
+  if (c) { c.innerHTML = ''; delete c.dataset.lastDate; }
 }
 
 function escapeHtml(s) {
@@ -624,6 +657,10 @@ async function loadUserList(q = '') {
     const { users } = await res.json();
     const list = document.getElementById('contacts-list');
     list.innerHTML = '';
+    // Online contacts first, then alphabetical by username
+    users.sort((a, b) =>
+      (b.is_online ? 1 : 0) - (a.is_online ? 1 : 0) ||
+      a.username.localeCompare(b.username));
     if (!users || users.length === 0) {
       const empty = document.createElement('li');
       empty.style.cssText = 'padding:12px 16px; color:var(--text-3); font-size:12px; text-align:center;';
@@ -745,6 +782,41 @@ function updateEncryptionBadge(active) {
 
 // ── UI Utilities ─────────────────────────────────────────────────
 
+/** Conversation id for an arbitrary incoming message (mirrors getActiveConvId). */
+function _convIdForMessage(msg) {
+  if (msg.group_id) return `grp_${msg.group_id}`;
+  const otherId = msg.sender_id === currentUser.id ? msg.recipient_id : msg.sender_id;
+  return `dm_${Math.min(currentUser.id, otherId)}_${Math.max(currentUser.id, otherId)}`;
+}
+
+/**
+ * Match the server's echo of our own message to the oldest pending optimistic
+ * bubble for that conversation, swap in the real message id, and update the
+ * "sending" indicator to a delivered/read receipt.
+ */
+function _reconcileOutgoing(convId, msg) {
+  // Drop entries whose optimistic bubble no longer exists (e.g. the user
+  // switched conversations — and cleared the thread — before the echo arrived)
+  // so a stale entry can't shadow the match for a later message.
+  _pendingOutgoing = _pendingOutgoing.filter(p => document.getElementById(`msg-${p.tempId}`));
+
+  const idx = _pendingOutgoing.findIndex(p => p.convId === convId);
+  if (idx === -1) return;
+  const { tempId } = _pendingOutgoing.splice(idx, 1)[0];
+
+  const el = document.getElementById(`msg-${tempId}`);
+  if (!el) return;
+  el.id = `msg-${msg.id}`;
+
+  const receipt = el.querySelector('.msg-receipt');
+  if (receipt) {
+    receipt.classList.remove('sending');
+    receipt.title       = msg.read_at ? 'Read' : (msg.delivered_at ? 'Delivered' : 'Sent');
+    receipt.textContent = (msg.read_at || msg.delivered_at) ? '✓✓' : '✓';
+    if (msg.read_at) receipt.style.color = '#00d4ff';
+  }
+}
+
 function getActiveConvId() {
   if (!activeConversation) return null;
   if (activeConversation.type === 'dm') {
@@ -803,12 +875,16 @@ function showConnectionBanner(connected) {
 }
 
 function showAlert(msg, type = 'info') {
-  const el = document.getElementById('chat-alert');
-  if (!el) return;
-  el.textContent = msg;
-  el.className = `chat-alert alert-${type}`;
-  el.style.display = 'block';
-  setTimeout(() => { el.style.display = 'none'; }, 4000);
+  const container = document.getElementById('chat-alert');
+  if (!container) return;
+  const toast = document.createElement('div');
+  toast.className = `toast toast-${type}`;
+  toast.textContent = msg;
+  container.appendChild(toast);
+  setTimeout(() => {
+    toast.classList.add('toast-out');
+    setTimeout(() => toast.remove(), 250);
+  }, 4000);
 }
 
 function closeModal(id) {

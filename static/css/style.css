@@ -644,6 +644,8 @@ html, body {
 .msg-time { font-size: 10px; color: var(--text-3); }
 .msg-enc-icon { font-size: 10px; opacity: 0.5; }
 .msg-receipt { font-size: 10px; color: var(--text-3); }
+.msg-receipt.sending { animation: pulse-receipt 1.2s ease-in-out infinite; }
+@keyframes pulse-receipt { 0%, 100% { opacity: 0.35; } 50% { opacity: 0.9; } }
 
 .msg-timer {
   font-size: 10px; color: var(--text-warn);
@@ -783,19 +785,36 @@ html, body {
 .send-btn:hover { transform: scale(1.05); box-shadow: 0 6px 24px rgba(0,212,255,0.4); }
 .send-btn:active { transform: scale(0.96); }
 
-/* ── Chat Alert ───────────────────────────────────────────────── */
-#chat-alert {
-  display: none; position: fixed; top: 24px; right: 24px;
-  z-index: 100; padding: 12px 20px; border-radius: var(--radius-sm);
-  font-size: 13px; max-width: 360px;
-  animation: slideLeft 0.3s cubic-bezier(0.16,1,0.3,1) both;
-  box-shadow: var(--shadow);
+/* ── Toasts ───────────────────────────────────────────────────── */
+.toast-container {
+  position: fixed; top: 24px; right: 24px; z-index: 100;
+  display: flex; flex-direction: column; gap: 8px;
+  max-width: 360px; pointer-events: none;
 }
-@keyframes slideLeft { from { opacity: 0; transform: translateX(20px); } to { opacity: 1; transform: none; } }
-.alert-info    { background: var(--bg-3); border: 1px solid var(--border-2); color: var(--cyan); }
-.alert-success { background: rgba(52,211,153,0.12); border: 1px solid rgba(52,211,153,0.25); color: #34d399; }
-.alert-error   { background: rgba(248,113,113,0.1); border: 1px solid rgba(248,113,113,0.25); color: #fca5a5; }
-.alert-warning { background: rgba(251,191,36,0.1); border: 1px solid rgba(251,191,36,0.25); color: var(--text-warn); }
+.toast {
+  padding: 12px 20px; border-radius: var(--radius-sm);
+  font-size: 13px; box-shadow: var(--shadow);
+  animation: slideLeft 0.3s cubic-bezier(0.16,1,0.3,1) both;
+  pointer-events: all;
+}
+.toast.toast-out { animation: fadeOutRight 0.25s ease both; }
+@keyframes slideLeft    { from { opacity: 0; transform: translateX(20px); } to { opacity: 1; transform: none; } }
+@keyframes fadeOutRight { from { opacity: 1; transform: none; } to { opacity: 0; transform: translateX(20px); } }
+.toast-info    { background: var(--bg-3); border: 1px solid var(--border-2); color: var(--cyan); }
+.toast-success { background: rgba(52,211,153,0.12); border: 1px solid rgba(52,211,153,0.25); color: #34d399; }
+.toast-error   { background: rgba(248,113,113,0.1); border: 1px solid rgba(248,113,113,0.25); color: #fca5a5; }
+.toast-warning { background: rgba(251,191,36,0.1); border: 1px solid rgba(251,191,36,0.25); color: var(--text-warn); }
+
+/* ── Date Separators ──────────────────────────────────────────── */
+.date-sep {
+  display: flex; align-items: center; gap: 10px;
+  margin: 14px 4px 10px;
+}
+.date-sep-line { flex: 1; height: 1px; background: var(--border); }
+.date-sep-text {
+  font-size: 10px; color: var(--text-3); letter-spacing: 0.5px;
+  text-transform: uppercase; white-space: nowrap;
+}
 
 /* ── Unlock Overlay ───────────────────────────────────────────── */
 #unlock-overlay {

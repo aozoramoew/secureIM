@@ -21,6 +21,18 @@ async function initChat() {
   currentUser  = SecureStorage.getUser();
   if (!token || !currentUser) { window.location.href = '/login'; return; }
 
+  const unlockUsernameEl = document.getElementById('unlock-username');
+  if (unlockUsernameEl) unlockUsernameEl.textContent = currentUser.username;
+
+  document.getElementById('unlock-switch-account-btn')?.addEventListener('click', () => {
+    // Wipes this device's local keys/history (the only copy — E2EE), then sends
+    // the user to /login to sign into a different account. Confirm first since
+    // it's irreversible for this account's locally-stored data.
+    if (confirm('Switching accounts will remove this account\'s encrypted keys and message history from this device (they cannot be recovered). Continue?')) {
+      logout();
+    }
+  });
+
   // Prompt for password to unlock local keys. A mistyped password must NOT
   // wipe local storage — it's the only copy of the private key and message
   // history (E2EE: nothing usable is stored server-side), so we just let the

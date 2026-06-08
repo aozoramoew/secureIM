@@ -846,6 +846,9 @@ html, body {
 .unlock-card .auth-logo  { margin-bottom: 24px; }
 .unlock-card h2          { font-size: 18px; margin-bottom: 8px; font-weight: 700; }
 .unlock-card p           { color: var(--text-2); font-size: 13px; margin-bottom: 20px; line-height: 1.6; }
+.unlock-account-hint     { margin-bottom: 20px !important; font-size: 12px !important; }
+.unlock-account-hint strong { color: var(--text); }
+#unlock-switch-account-btn { width: 100%; }
 
 /* ── Group Modal ──────────────────────────────────────────────── */
 .modal-overlay {

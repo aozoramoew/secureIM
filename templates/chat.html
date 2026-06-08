@@ -20,8 +20,11 @@
       <div class="auth-logo-text">Secure<span>IM</span></div>
     </div>
     <h2 style="font-size:18px; margin-bottom:8px; font-weight:700;">Unlock your keys</h2>
-    <p style="color:var(--text-2); font-size:13px; margin-bottom:20px; line-height:1.6;">
+    <p style="color:var(--text-2); font-size:13px; margin-bottom:4px; line-height:1.6;">
       Enter your password to decrypt your private keys and start the session.
+    </p>
+    <p class="unlock-account-hint">
+      Unlocking as <strong id="unlock-username">…</strong>
     </p>
     <div class="field">
       <label for="unlock-password">Password</label>
@@ -29,6 +32,9 @@
     </div>
     <button id="unlock-btn" class="btn btn-primary btn-mt">
       <span class="btn-text">🔓 Unlock &amp; Enter</span>
+    </button>
+    <button id="unlock-switch-account-btn" class="btn btn-ghost btn-mt">
+      <span class="btn-text">↩️ Not you? Sign in to a different account</span>
     </button>
   </div>
 </div>

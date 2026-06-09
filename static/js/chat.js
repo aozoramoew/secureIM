@@ -403,7 +403,18 @@ function clearAttachment() {
   document.getElementById('media-preview-video').src = '';
 }
 
+let _sending = false;
 async function sendMessage() {
+  if (_sending) return;
+  _sending = true;
+  try {
+    await _sendMessageInner();
+  } finally {
+    _sending = false;
+  }
+}
+
+async function _sendMessageInner() {
   const input = document.getElementById('message-input');
   const text  = input.value.trim();
   if (!text && !currentAttachment) return;
@@ -415,6 +426,7 @@ async function sendMessage() {
   }
 
   input.value = '';
+  input.style.height = 'auto';
   input.focus();
 
   const sessionKeys = SecureStorage.getSessionKeys(activeConversation.sessionId);
@@ -791,13 +803,32 @@ async function _loadGroupKey(groupId, sessionId) {
       return;
     }
 
-    console.log('[_loadGroupKey] unwrapping bundle for group', groupId, 'device', SecureStorage.getDeviceId());
     const { aesKey, hmacKey } = await SecureCrypto.unwrapGroupKey(bundle, myEcdhPrivKey);
     SecureStorage.storeSessionKeys(sessionId, aesKey, hmacKey, null);
     updateEncryptionBadge(true);
-    console.log('[_loadGroupKey] group key loaded OK for', sessionId);
   } catch (e) {
-    console.error('[_loadGroupKey] unwrapGroupKey threw:', e);
+    console.error('[_loadGroupKey] unwrapGroupKey failed:', e.message);
+    // Bundle is stale — clear it and request a fresh one from online members.
+    await fetch(`${CHAT_API}/groups/${groupId}/my-key`, {
+      method: 'DELETE',
+      headers: { Authorization: `Bearer ${SecureStorage.getAuthToken()}` },
+    }).catch(() => {});
+    const myDeviceId = SecureStorage.getDeviceId();
+    const myKeyRes = await apiGet(`${CHAT_API}/users/${currentUser.username}/keys`).catch(() => null);
+    if (myKeyRes?.ok) {
+      const { devices: myDevs } = await myKeyRes.json();
+      const myDev = myDevs.find(d => d.device_id === myDeviceId);
+      if (myDev) {
+        socket.emit('request_group_key', {
+          group_id: groupId,
+          device_id: myDeviceId,
+          ecdh_public_key: myDev.ecdh_public_key,
+        });
+        showAlert('🔑 Group key mismatch — requesting fresh key from members…', 'info');
+        setTimeout(() => _loadGroupKey(groupId, sessionId), 3000);
+        return;
+      }
+    }
     showAlert('❌ Failed to load group key: ' + e.message, 'error');
   }
 }

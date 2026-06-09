@@ -10,4 +10,5 @@ sio = socketio.AsyncServer(
     cors_allowed_origins='*',
     logger=False,
     engineio_logger=False,
+    max_http_buffer_size=10 * 1024 * 1024,  # 10 MB for encrypted image payloads
 )

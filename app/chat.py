@@ -679,6 +679,24 @@ def get_group_history(
     return {'messages': result}
 
 
+@router.delete('/groups/{group_id}/my-key')
+def clear_my_group_key(
+    group_id: int,
+    auth=Depends(get_current_user_and_device),
+    db: Session = Depends(get_db),
+):
+    """Remove this device's stale group key bundle so it can be re-issued."""
+    current_user, current_device = auth
+    member = db.query(GroupMember).filter_by(group_id=group_id, user_id=current_user.id).first()
+    if not member:
+        raise HTTPException(status_code=403, detail='Not a member')
+    keys = json.loads(member.encrypted_group_keys or '{}')
+    keys.pop(current_device.device_id, None)
+    member.encrypted_group_keys = json.dumps(keys)
+    db.commit()
+    return {'message': 'Bundle cleared'}
+
+
 @router.get('/groups/{group_id}/my-key')
 def get_my_group_key(
     group_id: int,

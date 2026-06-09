@@ -443,6 +443,13 @@ html, body {
   transition: var(--trans); border-radius: 0;
 }
 .contact-item:hover { background: rgba(255,255,255,0.04); }
+.group-delete-btn {
+  display: none; margin-left: auto; background: none; border: none;
+  color: var(--text-3); cursor: pointer; font-size: 13px; padding: 2px 4px;
+  border-radius: 4px; flex-shrink: 0;
+}
+.contact-item:hover .group-delete-btn { display: block; }
+.group-delete-btn:hover { color: #ff6b6b; }
 .contact-item.active { background: rgba(0,212,255,0.08); }
 .contact-item.active::before {
   content: ''; position: absolute; left: 0; top: 0; bottom: 0;

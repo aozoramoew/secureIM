@@ -564,6 +564,38 @@ async def create_group(
     return {'group': group.to_dict()}
 
 
+@router.delete('/groups/{group_id}')
+async def delete_group(
+    group_id: int,
+    auth=Depends(get_current_user_and_device),
+    db: Session = Depends(get_db),
+):
+    current_user, _ = auth
+    member = db.query(GroupMember).filter_by(
+        group_id=group_id, user_id=current_user.id, is_admin=True
+    ).first()
+    if not member:
+        raise HTTPException(status_code=403, detail='Only group admin can delete')
+
+    group = db.get(Group, group_id)
+    if not group:
+        raise HTTPException(status_code=404, detail='Group not found')
+
+    # Notify all members before deletion
+    all_members = db.query(GroupMember).filter_by(group_id=group_id).all()
+    member_ids = [m.user_id for m in all_members]
+
+    # Delete messages, members, then group
+    db.query(Message).filter_by(group_id=group_id).delete()
+    db.query(GroupMember).filter_by(group_id=group_id).delete()
+    db.delete(group)
+    db.commit()
+
+    for uid in member_ids:
+        await _emit_to_user(uid, 'group_deleted', {'group_id': group_id})
+    return {'message': 'Group deleted'}
+
+
 @router.get('/groups')
 def list_groups(
     auth=Depends(get_current_user_and_device),

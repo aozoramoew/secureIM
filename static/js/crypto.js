@@ -418,19 +418,20 @@ const SecureCrypto = (() => {
     const ephemeral = await generateEphemeralKeyPair();
     const ephPubJwk = await exportKeyJWK(ephemeral.publicKey);
 
-    // Derive a wrapping key via ECDH + HKDF
     const wrapKey = await deriveSessionKey(ephemeral.privateKey, recipientEcdhPubJwk);
 
-    // Export the group keys as raw bytes, then encrypt with AES-GCM (not AES-KW,
-    // since AES-KW requires extractable=true but AES-GCM works for any key material)
-    const aesRaw  = await crypto.subtle.exportKey('raw', aesKey);
-    const hmacRaw = await crypto.subtle.exportKey('raw', hmacKey);
+    // Export raw bytes: AES-256 = 32 bytes, HMAC-SHA256 default = 64 bytes
+    const aesRaw  = new Uint8Array(await crypto.subtle.exportKey('raw', aesKey));
+    const hmacRaw = new Uint8Array(await crypto.subtle.exportKey('raw', hmacKey));
+
+    // Pack as [2-byte aes length][aes bytes][hmac bytes] so unwrap can split correctly
+    const aesLen = new Uint16Array([aesRaw.length]);
+    const combined = new Uint8Array(2 + aesRaw.length + hmacRaw.length);
+    combined.set(new Uint8Array(aesLen.buffer), 0);
+    combined.set(aesRaw,  2);
+    combined.set(hmacRaw, 2 + aesRaw.length);
 
     const nonce = crypto.getRandomValues(new Uint8Array(12));
-    const combined = new Uint8Array(32 + 32);  // AES 256-bit + HMAC 256-bit
-    combined.set(new Uint8Array(aesRaw),  0);
-    combined.set(new Uint8Array(hmacRaw), 32);
-
     const encBuf = await crypto.subtle.encrypt(
       { name: 'AES-GCM', iv: nonce }, wrapKey, combined
     );
@@ -449,15 +450,16 @@ const SecureCrypto = (() => {
   async function unwrapGroupKey(bundle, myEcdhPrivKey) {
     const wrapKey = await deriveSessionKey(myEcdhPrivKey, bundle.eph_pub);
 
-    const decBuf = await crypto.subtle.decrypt(
+    const decBuf = new Uint8Array(await crypto.subtle.decrypt(
       { name: 'AES-GCM', iv: new Uint8Array(b64ToBuf(bundle.nonce)) },
       wrapKey,
       b64ToBuf(bundle.ciphertext)
-    );
+    ));
 
-    const combined = new Uint8Array(decBuf);
-    const aesRaw  = combined.slice(0, 32);
-    const hmacRaw = combined.slice(32, 64);
+    // Read the 2-byte length prefix to split AES and HMAC raw bytes
+    const aesLen  = new Uint16Array(decBuf.slice(0, 2).buffer)[0];
+    const aesRaw  = decBuf.slice(2, 2 + aesLen);
+    const hmacRaw = decBuf.slice(2 + aesLen);
 
     const aesKey = await crypto.subtle.importKey(
       'raw', aesRaw, { name: 'AES-GCM', length: 256 }, false, ['encrypt', 'decrypt']

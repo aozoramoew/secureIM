@@ -18,11 +18,32 @@ _static_dir    = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__
 _templates_dir = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), 'templates')
 
 
+def _migrate_schema(engine):
+    """Add any columns that may be missing from tables created before schema updates."""
+    import sqlalchemy as _sa
+    insp = _sa.inspect(engine)
+    with engine.connect() as conn:
+        # groups.key_version — added after initial deploy
+        if 'groups' in insp.get_table_names():
+            cols = {c['name'] for c in insp.get_columns('groups')}
+            if 'key_version' not in cols:
+                conn.execute(_sa.text('ALTER TABLE groups ADD COLUMN key_version INTEGER DEFAULT 1'))
+                conn.commit()
+        # messages.session_id is NOT in the model (passed in socket events only) — skip
+        # messages.cleanup_at — added for self-destruct
+        if 'messages' in insp.get_table_names():
+            cols = {c['name'] for c in insp.get_columns('messages')}
+            if 'cleanup_at' not in cols:
+                conn.execute(_sa.text('ALTER TABLE messages ADD COLUMN cleanup_at DATETIME'))
+                conn.commit()
+
+
 def create_app():
     # ── Create tables ──────────────────────────────────────────────
     from app.database import engine, Base
     import app.models  # registers all ORM classes  # noqa: F401
     Base.metadata.create_all(bind=engine)
+    _migrate_schema(engine)
 
     # ── FastAPI app ────────────────────────────────────────────────
     app = FastAPI(

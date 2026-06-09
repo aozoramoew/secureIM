@@ -469,7 +469,7 @@ def get_dm_history(
 
 
 @router.delete('/messages/{msg_id}')
-def delete_message_rest(
+async def delete_message_rest(
     msg_id: int,
     type: str = 'local',
     auth=Depends(get_current_user_and_device),
@@ -482,15 +482,14 @@ def delete_message_rest(
     if current_user.id not in (msg.sender_id, msg.recipient_id):
         raise HTTPException(status_code=403, detail='Forbidden')
 
-    import asyncio
     if type == 'deep':
         msg.is_deep_deleted    = True
         msg.deep_deleted_at    = datetime.utcnow()
         msg.deep_deleted_by    = current_user.id
         msg.encrypted_payloads = '{}'
         db.commit()
-        asyncio.run(_emit_to_user(msg.sender_id,    'message_deleted', {'message_id': msg_id, 'type': 'deep'}))
-        asyncio.run(_emit_to_user(msg.recipient_id, 'message_deleted', {'message_id': msg_id, 'type': 'deep'}))
+        await _emit_to_user(msg.sender_id,    'message_deleted', {'message_id': msg_id, 'type': 'deep'})
+        await _emit_to_user(msg.recipient_id, 'message_deleted', {'message_id': msg_id, 'type': 'deep'})
     else:
         msg.add_deleted_for(current_user.id)
         db.commit()

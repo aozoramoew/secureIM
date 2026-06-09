@@ -11,6 +11,7 @@ Endpoints:
   DELETE /api/auth/devices/{device_id}
 """
 import json
+import logging
 from datetime import datetime
 from typing import Optional
 
@@ -25,6 +26,8 @@ from app.crypto_utils import (
     hash_password, verify_password, needs_rehash,
     generate_jwt, decode_jwt,
 )
+
+log = logging.getLogger(__name__)
 
 router = APIRouter()
 
@@ -124,24 +127,29 @@ def register(request: Request, body: RegisterBody,
     if db.query(User).filter_by(username=username).first():
         raise HTTPException(status_code=409, detail='Username already taken')
 
-    user = User(
-        username=username,
-        password_hash=hash_password(password),
-    )
-    db.add(user)
-    db.flush()
+    try:
+        user = User(
+            username=username,
+            password_hash=hash_password(password),
+        )
+        db.add(user)
+        db.flush()
 
-    # Register the device and store only public keys — private keys stay on device
-    device = DeviceKey(
-        user_id=user.id,
-        device_id=device_id,
-        ecdsa_public_key=body.ecdsa_public_key,
-        ecdh_public_key=body.ecdh_public_key,
-        device_name=device_name,
-        is_active=True,
-    )
-    db.add(device)
-    db.commit()
+        # Register the device and store only public keys — private keys stay on device
+        device = DeviceKey(
+            user_id=user.id,
+            device_id=device_id,
+            ecdsa_public_key=body.ecdsa_public_key,
+            ecdh_public_key=body.ecdh_public_key,
+            device_name=device_name,
+            is_active=True,
+        )
+        db.add(device)
+        db.commit()
+    except Exception as exc:
+        db.rollback()
+        log.exception('[register] DB error for username=%s: %s', username, exc)
+        raise HTTPException(status_code=500, detail=f'Registration failed: {exc}')
 
     token = generate_jwt(user.id, device_id)
     _audit(db, 'register', request, user_id=user.id,

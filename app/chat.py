@@ -577,6 +577,22 @@ def get_group_history(
     return {'messages': result}
 
 
+@router.get('/groups/{group_id}/my-key')
+def get_my_group_key(
+    group_id: int,
+    auth=Depends(get_current_user_and_device),
+    db: Session = Depends(get_db),
+):
+    """Return the encrypted group key bundle for the caller's current device."""
+    current_user, current_device = auth
+    member = db.query(GroupMember).filter_by(group_id=group_id, user_id=current_user.id).first()
+    if not member:
+        raise HTTPException(status_code=403, detail='Not a member')
+    keys = json.loads(member.encrypted_group_keys or '{}')
+    bundle = keys.get(current_device.device_id)
+    return {'bundle': bundle}
+
+
 class UpdateGroupKeysBody(BaseModel):
     encrypted_keys: dict = {}
 

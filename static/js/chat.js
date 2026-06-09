@@ -386,8 +386,14 @@ async function sendMessage() {
     }
 
     if (activeConversation.type === 'dm') {
+      if (!activeConversation.username) {
+        showAlert('❌ Cannot send: recipient username unknown.', 'error');
+        return;
+      }
       const keysRes = await apiGet(`${CHAT_API}/users/${activeConversation.username}/keys`);
+      if (!keysRes.ok) { showAlert('❌ Could not fetch recipient keys.', 'error'); return; }
       const { devices } = await keysRes.json();
+      if (!devices?.length) { showAlert('❌ Recipient has no registered devices.', 'error'); return; }
 
       for (const dev of devices) {
         if (hasEphemeralSession) {
@@ -421,13 +427,18 @@ async function sendMessage() {
         }
       }
     } else {
-      // Group: encrypt with group AES key for each member device
-      const aesKey  = hasEphemeralSession ? sessionKeys.aesKey  : null;
-      const hmacKey = hasEphemeralSession ? sessionKeys.hmacKey : null;
-      if (!aesKey) {
-        showAlert('⚠️ No group session key yet.', 'warning');
-        return;
+      // Group: use the group AES key unwrapped from server on openGroup()
+      const groupKeys = SecureStorage.getSessionKeys(activeConversation.sessionId);
+      if (!groupKeys?.aesKey) {
+        // Try to load it now (e.g. if group was opened before key was ready)
+        await _loadGroupKey(activeConversation.id, activeConversation.sessionId);
+        const retried = SecureStorage.getSessionKeys(activeConversation.sessionId);
+        if (!retried?.aesKey) {
+          showAlert('⚠️ Group key not available — cannot send message.', 'warning');
+          return;
+        }
       }
+      const { aesKey, hmacKey } = SecureStorage.getSessionKeys(activeConversation.sessionId);
       deviceMap['group'] = await encryptForDevice(aesKey, hmacKey);
     }
 
@@ -632,7 +643,8 @@ async function openDM(userId, username) {
 async function openGroup(groupId, groupName) {
   clearMessages();
   clearAttachment();
-  activeConversation = { type: 'group', id: groupId, name: groupName, sessionId: `grp_${groupId}` };
+  const sessionId = `grp_${groupId}`;
+  activeConversation = { type: 'group', id: groupId, name: groupName, sessionId };
   document.getElementById('chat-header-name').textContent = '# ' + groupName;
   const avatarEl = document.getElementById('chat-header-avatar');
   if (avatarEl) { avatarEl.textContent = '#'; avatarEl.classList.add('group-avatar'); }
@@ -641,11 +653,33 @@ async function openGroup(groupId, groupName) {
 
   setActiveSidebarItem(groupId, 'group');
   clearUnreadBadge(groupId);
-  updateEncryptionBadge(true);
+  updateEncryptionBadge(false);
+
+  // Load our wrapped group key from the server and unwrap it
+  await _loadGroupKey(groupId, sessionId);
 
   const convId = `grp_${groupId}`;
   const history = await SecureStorage.getConversation(currentPassword, convId);
   history.forEach(m => renderMessage(m, m.sender_id === currentUser.id));
+}
+
+async function _loadGroupKey(groupId, sessionId) {
+  // Already loaded for this session
+  const existing = SecureStorage.getSessionKeys(sessionId);
+  if (existing?.aesKey) return;
+
+  try {
+    const res = await apiGet(`${CHAT_API}/groups/${groupId}/my-key`);
+    if (!res.ok) { showAlert('⚠️ Could not load group key — messages cannot be decrypted.', 'warning'); return; }
+    const { bundle } = await res.json();
+    if (!bundle) { showAlert('⚠️ No group key found for your device.', 'warning'); return; }
+
+    const { aesKey, hmacKey } = await SecureCrypto.unwrapGroupKey(bundle, myEcdhPrivKey);
+    SecureStorage.storeSessionKeys(sessionId, aesKey, hmacKey, null);
+    updateEncryptionBadge(true);
+  } catch (e) {
+    showAlert('❌ Failed to load group key: ' + e.message, 'error');
+  }
 }
 
 // ── CSP-safe DOM builder for messages ────────────────────────────
@@ -907,12 +941,43 @@ async function createGroup() {
   if (!name) return;
 
   const checked = [...document.querySelectorAll('.member-check:checked')].map(el => +el.value);
-  const res = await apiPost(`${CHAT_API}/groups`, { name, member_ids: checked });
-  if (res.ok) {
-    nameEl.value = '';
-    closeModal('group-modal');
-    await loadGroups();
+
+  // Generate the group AES+HMAC key pair (shared by all members)
+  const { aesKey, hmacKey } = await SecureCrypto.generateGroupKey();
+
+  // Collect all member user IDs including the creator
+  const allMemberIds = [...new Set([currentUser.id, ...checked])];
+
+  // Fetch all device public keys for every member, wrap group key per device
+  const encryptedKeys = {};  // device_id → wrapped bundle
+  for (const uid of allMemberIds) {
+    // Find username for this user id from contacts list
+    const contacts = SecureStorage.getContacts();
+    const contact = contacts.find(c => c.id === uid);
+    const uname = uid === currentUser.id ? currentUser.username : contact?.username;
+    if (!uname) continue;
+
+    const kr = await apiGet(`${CHAT_API}/users/${uname}/keys`);
+    if (!kr.ok) continue;
+    const { devices } = await kr.json();
+    for (const dev of devices) {
+      encryptedKeys[dev.device_id] = await SecureCrypto.wrapGroupKey(
+        aesKey, hmacKey, dev.ecdh_public_key
+      );
+    }
   }
+
+  // Create the group on the server
+  const res = await apiPost(`${CHAT_API}/groups`, { name, member_ids: checked });
+  if (!res.ok) { showAlert('❌ Failed to create group', 'error'); return; }
+  const { group } = await res.json();
+
+  // Upload encrypted group keys for all member devices
+  await apiPut(`${CHAT_API}/groups/${group.id}/keys`, { encrypted_keys: encryptedKeys });
+
+  nameEl.value = '';
+  closeModal('group-modal');
+  await loadGroups();
 }
 
 function onGroupCreated(data) {

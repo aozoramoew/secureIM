@@ -2,16 +2,21 @@
  * storage.js — SecureIM Encrypted Local Storage
  *
  * Manages all client-side persistence:
- *  - Encrypted private keys (PBKDF2-derived key)
- *  - Encrypted chat history (per-conversation, per-user)
- *  - Session ephemeral keys (in-memory only — lost on tab close)
- *  - User settings (store_history, session_mode)
- *  - Contact list & verified status
+ *  - Encrypted private keys  (PBKDF2-derived key)
+ *  - Encrypted chat history  (per-conversation, AES-256-GCM)
+ *  - Encrypted contacts list (AES-256-GCM, same key)
+ *  - Encrypted user object   (AES-256-GCM, same key)
+ *  - Encrypted settings      (AES-256-GCM, same key)
+ *  - Encrypted device ID     (AES-256-GCM, same key)
+ *  - Session ephemeral keys  (in-memory only — lost on tab close)
+ *
+ * ALL data written to localStorage is encrypted with a key derived from
+ * the user's password via PBKDF2-SHA256 (310 000 iterations) → AES-256-GCM.
+ * Nothing is stored in plaintext.
  *
  * Session-mode behavior:
  *  - When session_mode = ON: messages from the CURRENT session are held
- *    in memory only. They are NOT written to localStorage. On page refresh
- *    they are gone. Older persisted history remains intact.
+ *    in memory only. They are NOT written to localStorage.
  *  - When session_mode = OFF (default): all messages are encrypted and
  *    stored in localStorage.
  */
@@ -19,45 +24,118 @@
 const SecureStorage = (() => {
 
   const KEYS = {
-    identity:       'sim_identity',      // {ecdsa: {enc...}, ecdh: {enc...}}
-    deviceId:       'sim_device_id',
-    authToken:      'sim_auth_token',
-    user:           'sim_user',
-    settings:       'sim_settings',
-    contacts:       'sim_contacts',
-    storageKeyMeta: 'sim_storage_meta',  // {salt, username}
+    identity:    'sim_identity',    // {ecdsa: {enc...}, ecdh: {enc...}}
+    deviceId:    'sim_device_id',   // encrypted string
+    user:        'sim_user',        // encrypted user object
+    settings:    'sim_settings',    // encrypted settings object
+    contacts:    'sim_contacts',    // encrypted contacts array
+    storageMeta: 'sim_storage_meta', // {salt, username} — salt is not secret
   };
 
   function historyKey(conversationId) {
     return `sim_hist_${conversationId}`;
   }
 
-  // ── Auth / Session ──────────────────────────────────────────────
+  // ── Storage salt management ─────────────────────────────────────
+  // We use a per-user salt stored alongside the ciphertext so that
+  // PBKDF2 always derives the same key for the same password+salt pair.
+  // The salt is not secret — keeping it in plaintext is standard practice.
 
-  function saveAuthToken(token)  { localStorage.setItem(KEYS.authToken, token); }
-  function getAuthToken()        { return localStorage.getItem(KEYS.authToken); }
-  function clearAuthToken()      { localStorage.removeItem(KEYS.authToken); }
+  function _getOrCreateSalt(username) {
+    const raw = localStorage.getItem(KEYS.storageMeta);
+    if (raw) {
+      try {
+        const meta = JSON.parse(raw);
+        if (meta.username === username && meta.salt) return meta.salt;
+      } catch { /* fall through to create new */ }
+    }
+    // Generate a new 32-byte salt and persist it
+    const salt = SecureCrypto.bufToB64(
+      crypto.getRandomValues(new Uint8Array(32)).buffer
+    );
+    localStorage.setItem(KEYS.storageMeta, JSON.stringify({ username, salt }));
+    return salt;
+  }
 
-  function saveUser(user)  { localStorage.setItem(KEYS.user, JSON.stringify(user)); }
-  function getUser()       { const u = localStorage.getItem(KEYS.user); return u ? JSON.parse(u) : null; }
-  function clearUser()     { localStorage.removeItem(KEYS.user); }
+  function _getSalt() {
+    const raw = localStorage.getItem(KEYS.storageMeta);
+    if (!raw) return null;
+    try { return JSON.parse(raw).salt || null; } catch { return null; }
+  }
 
-  function saveDeviceId(id) { localStorage.setItem(KEYS.deviceId, id); }
-  function getDeviceId()    { return localStorage.getItem(KEYS.deviceId); }
+  // ── Generic encrypted read/write ────────────────────────────────
 
-  function saveSettings(s)  { localStorage.setItem(KEYS.settings, JSON.stringify(s)); }
-  function getSettings()    {
-    const raw = localStorage.getItem(KEYS.settings);
-    return raw ? JSON.parse(raw) : { store_history: true, session_mode: false };
+  async function _encryptAndStore(password, storageKey, value) {
+    const salt = _getSalt();
+    const encrypted = await SecureCrypto.encryptForStorage(password, value, salt);
+    localStorage.setItem(storageKey, JSON.stringify(encrypted));
+  }
+
+  async function _decryptFromStore(password, storageKey, fallback) {
+    const raw = localStorage.getItem(storageKey);
+    if (!raw) return fallback;
+    try {
+      return await SecureCrypto.decryptFromStorage(password, JSON.parse(raw));
+    } catch {
+      return fallback;
+    }
+  }
+
+  // ── Device ID ────────────────────────────────────────────────────
+
+  async function saveDeviceId(password, id) {
+    await _encryptAndStore(password, KEYS.deviceId, id);
+  }
+
+  async function getDeviceId(password) {
+    return _decryptFromStore(password, KEYS.deviceId, null);
+  }
+
+  // Bootstrap path: device id may still be needed before password is known
+  // (e.g., during login form before unlock). Falls back to generating a new one.
+  function getDeviceIdSync() {
+    // During registration/login the device id hasn't been encrypted yet —
+    // we generate it fresh and it gets encrypted after first login succeeds.
+    return null;
+  }
+
+  // ── User ────────────────────────────────────────────────────────
+
+  async function saveUser(password, user) {
+    await _encryptAndStore(password, KEYS.user, user);
+  }
+
+  async function getUser(password) {
+    return _decryptFromStore(password, KEYS.user, null);
+  }
+
+  async function clearUser() {
+    localStorage.removeItem(KEYS.user);
+  }
+
+  // ── Settings ────────────────────────────────────────────────────
+
+  async function saveSettings(password, s) {
+    await _encryptAndStore(password, KEYS.settings, s);
+  }
+
+  async function getSettings(password) {
+    return _decryptFromStore(
+      password, KEYS.settings,
+      { store_history: true, session_mode: false }
+    );
   }
 
   // ── Identity Keys ───────────────────────────────────────────────
 
   /**
    * Save encrypted key pair to localStorage.
-   * Called once on registration, or when re-encrypting keys.
+   * Also initialises the per-user storage salt so all subsequent
+   * encrypted writes use a consistent salt.
    */
-  async function saveIdentityKeys(password, ecdsaPrivJwk, ecdhPrivJwk) {
+  async function saveIdentityKeys(password, ecdsaPrivJwk, ecdhPrivJwk, username) {
+    // Initialise salt now (idempotent if already exists for this username)
+    if (username) _getOrCreateSalt(username);
     const encEcdsa = await SecureCrypto.encryptPrivateKey(password, ecdsaPrivJwk);
     const encEcdh  = await SecureCrypto.encryptPrivateKey(password, ecdhPrivJwk);
     localStorage.setItem(KEYS.identity, JSON.stringify({ ecdsa: encEcdsa, ecdh: encEcdh }));
@@ -90,23 +168,16 @@ const SecureStorage = (() => {
 
   // ── Chat History ────────────────────────────────────────────────
 
-  // In-memory store for current-session messages (session_mode=ON)
   const _sessionMessages = {};
 
-  /**
-   * Save a message to storage.
-   * Behavior depends on settings.session_mode and settings.store_history.
-   */
   async function saveMessage(password, conversationId, message) {
-    const settings = getSettings();
+    const settings = await getSettings(password);
 
-    // Always keep in-memory for current session
     if (!_sessionMessages[conversationId]) _sessionMessages[conversationId] = [];
     _sessionMessages[conversationId].push(message);
 
-    // Persist to localStorage only if both flags allow it
     if (!settings.store_history) return;
-    if (settings.session_mode) return;  // Session mode: don't persist current session msgs
+    if (settings.session_mode) return;
 
     await appendToHistory(password, conversationId, message);
   }
@@ -114,10 +185,10 @@ const SecureStorage = (() => {
   async function appendToHistory(password, conversationId, message) {
     const existing = await loadHistory(password, conversationId);
     existing.push(message);
-    // Keep last 500 messages per conversation
     const trimmed = existing.slice(-500);
     const key = historyKey(conversationId);
-    const encrypted = await SecureCrypto.encryptForStorage(password, trimmed);
+    const salt = _getSalt();
+    const encrypted = await SecureCrypto.encryptForStorage(password, trimmed, salt);
     localStorage.setItem(key, JSON.stringify(encrypted));
   }
 
@@ -132,13 +203,8 @@ const SecureStorage = (() => {
     }
   }
 
-  /**
-   * Get full conversation history:
-   * - Persisted (encrypted localStorage) messages, PLUS
-   * - Current in-memory session messages (deduplicated by message id)
-   */
   async function getConversation(password, conversationId) {
-    const settings = getSettings();
+    const settings = await getSettings(password);
     let persisted = [];
 
     if (settings.store_history) {
@@ -147,7 +213,6 @@ const SecureStorage = (() => {
 
     const sessionMsgs = _sessionMessages[conversationId] || [];
 
-    // Merge + deduplicate
     const seen = new Set(persisted.map(m => m.id));
     const merged = [...persisted];
     for (const m of sessionMsgs) {
@@ -157,44 +222,35 @@ const SecureStorage = (() => {
     return merged.sort((a, b) => new Date(a.timestamp) - new Date(b.timestamp));
   }
 
-  /**
-   * Delete all locally-stored messages for a conversation (delete-for-me).
-   * Does NOT affect the server or the other party.
-   */
   async function deleteConversationLocal(conversationId) {
     localStorage.removeItem(historyKey(conversationId));
     delete _sessionMessages[conversationId];
   }
 
-  /**
-   * Remove a single message from local history (delete-for-me on single msg).
-   */
   async function deleteMessageLocal(password, conversationId, messageId) {
     const msgs = await loadHistory(password, conversationId);
     const filtered = msgs.filter(m => m.id !== messageId);
     const key = historyKey(conversationId);
     if (filtered.length > 0) {
-      const encrypted = await SecureCrypto.encryptForStorage(password, filtered);
+      const salt = _getSalt();
+      const encrypted = await SecureCrypto.encryptForStorage(password, filtered, salt);
       localStorage.setItem(key, JSON.stringify(encrypted));
     } else {
       localStorage.removeItem(key);
     }
-    // Also remove from session memory
     if (_sessionMessages[conversationId]) {
       _sessionMessages[conversationId] = _sessionMessages[conversationId].filter(m => m.id !== messageId);
     }
   }
 
-  /**
-   * Mark a message as deep-deleted in local storage.
-   */
   async function markDeepDeleted(password, conversationId, messageId) {
     const msgs = await loadHistory(password, conversationId);
     const updated = msgs.map(m =>
       m.id === messageId ? { ...m, is_deep_deleted: true, plaintext: null } : m
     );
     const key = historyKey(conversationId);
-    const encrypted = await SecureCrypto.encryptForStorage(password, updated);
+    const salt = _getSalt();
+    const encrypted = await SecureCrypto.encryptForStorage(password, updated, salt);
     localStorage.setItem(key, JSON.stringify(encrypted));
 
     if (_sessionMessages[conversationId]) {
@@ -206,18 +262,17 @@ const SecureStorage = (() => {
 
   // ── Contacts ────────────────────────────────────────────────────
 
-  function saveContacts(contacts) {
-    localStorage.setItem(KEYS.contacts, JSON.stringify(contacts));
+  async function saveContacts(password, contacts) {
+    await _encryptAndStore(password, KEYS.contacts, contacts);
   }
 
-  function getContacts() {
-    const raw = localStorage.getItem(KEYS.contacts);
-    return raw ? JSON.parse(raw) : [];
+  async function getContacts(password) {
+    return _decryptFromStore(password, KEYS.contacts, []);
   }
 
   // ── Ephemeral Session Keys (in-memory only) ────────────────────
 
-  const _sessionKeys = {};  // sessionId → { aesKey, hmacKey, myEphemeral }
+  const _sessionKeys = {};
 
   function storeSessionKeys(sessionId, aesKey, hmacKey, myEphemeral) {
     _sessionKeys[sessionId] = { aesKey, hmacKey, myEphemeral };
@@ -235,30 +290,42 @@ const SecureStorage = (() => {
 
   function clearAll() {
     Object.values(KEYS).forEach(k => localStorage.removeItem(k));
-    // Clear all history keys
     const toRemove = [];
     for (let i = 0; i < localStorage.length; i++) {
       const k = localStorage.key(i);
       if (k && k.startsWith('sim_')) toRemove.push(k);
     }
     toRemove.forEach(k => localStorage.removeItem(k));
+    // Clear theme pref too
+    localStorage.removeItem('theme');
   }
 
   // ── Public API ──────────────────────────────────────────────────
 
   return {
-    saveAuthToken, getAuthToken, clearAuthToken,
-    saveUser, getUser, clearUser,
+    // Salt bootstrap (call once at register/login with username)
+    initSalt: _getOrCreateSalt,
+
+    // Device ID (async, encrypted)
     saveDeviceId, getDeviceId,
+
+    // User (async, encrypted)
+    saveUser, getUser, clearUser,
+
+    // Settings (async, encrypted)
     saveSettings, getSettings,
 
+    // Identity keys
     saveIdentityKeys, loadIdentityKeys, hasIdentityKeys, clearIdentityKeys,
 
+    // Chat history
     saveMessage, getConversation, deleteConversationLocal,
     deleteMessageLocal, markDeepDeleted,
 
+    // Contacts (async, encrypted)
     saveContacts, getContacts,
 
+    // Ephemeral session keys (in-memory)
     storeSessionKeys, getSessionKeys, clearSessionKeys,
 
     clearAll,

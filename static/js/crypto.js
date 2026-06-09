@@ -393,84 +393,6 @@ const SecureCrypto = (() => {
     return JSON.parse(u8ToStr(plaintextBuf));
   }
 
-  // ── Group Key (AES-256-GCM, wrapped per device via ECDH) ──────
-
-  /**
-   * Generate a fresh random AES-256-GCM group key and a matching HMAC key.
-   * Both are exportable so they can be wrapped (encrypted) for each member device.
-   */
-  async function generateGroupKey() {
-    const aesKey = await crypto.subtle.generateKey(
-      { name: 'AES-GCM', length: 256 }, true, ['encrypt', 'decrypt']
-    );
-    const hmacKey = await crypto.subtle.generateKey(
-      { name: 'HMAC', hash: 'SHA-256' }, true, ['sign', 'verify']
-    );
-    return { aesKey, hmacKey };
-  }
-
-  /**
-   * Wrap (encrypt) a group key pair for a single recipient device using ECDH.
-   * Creates a one-shot ephemeral ECDH pair, derives AES-KW key, wraps the group keys.
-   * Returns a bundle the recipient can unwrap with their static ECDH private key.
-   */
-  async function wrapGroupKey(aesKey, hmacKey, recipientEcdhPubJwk) {
-    const ephemeral = await generateEphemeralKeyPair();
-    const ephPubJwk = await exportKeyJWK(ephemeral.publicKey);
-
-    const wrapKey = await deriveSessionKey(ephemeral.privateKey, recipientEcdhPubJwk);
-
-    // Export raw bytes: AES-256 = 32 bytes, HMAC-SHA256 default = 64 bytes
-    const aesRaw  = new Uint8Array(await crypto.subtle.exportKey('raw', aesKey));
-    const hmacRaw = new Uint8Array(await crypto.subtle.exportKey('raw', hmacKey));
-
-    // Pack as [2-byte aes length][aes bytes][hmac bytes] so unwrap can split correctly
-    const aesLen = new Uint16Array([aesRaw.length]);
-    const combined = new Uint8Array(2 + aesRaw.length + hmacRaw.length);
-    combined.set(new Uint8Array(aesLen.buffer), 0);
-    combined.set(aesRaw,  2);
-    combined.set(hmacRaw, 2 + aesRaw.length);
-
-    const nonce = crypto.getRandomValues(new Uint8Array(12));
-    const encBuf = await crypto.subtle.encrypt(
-      { name: 'AES-GCM', iv: nonce }, wrapKey, combined
-    );
-
-    return {
-      eph_pub:    ephPubJwk,
-      nonce:      bufToB64(nonce),
-      ciphertext: bufToB64(encBuf),
-    };
-  }
-
-  /**
-   * Unwrap a group key bundle using our static ECDH private key.
-   * Returns { aesKey, hmacKey } as CryptoKey objects ready for use.
-   */
-  async function unwrapGroupKey(bundle, myEcdhPrivKey) {
-    const wrapKey = await deriveSessionKey(myEcdhPrivKey, bundle.eph_pub);
-
-    const decBuf = new Uint8Array(await crypto.subtle.decrypt(
-      { name: 'AES-GCM', iv: new Uint8Array(b64ToBuf(bundle.nonce)) },
-      wrapKey,
-      b64ToBuf(bundle.ciphertext)
-    ));
-
-    // Read the 2-byte length prefix to split AES and HMAC raw bytes
-    const aesLen  = new Uint16Array(decBuf.slice(0, 2).buffer)[0];
-    const aesRaw  = decBuf.slice(2, 2 + aesLen);
-    const hmacRaw = decBuf.slice(2 + aesLen);
-
-    const aesKey = await crypto.subtle.importKey(
-      'raw', aesRaw, { name: 'AES-GCM', length: 256 }, false, ['encrypt', 'decrypt']
-    );
-    const hmacKey = await crypto.subtle.importKey(
-      'raw', hmacRaw, { name: 'HMAC', hash: 'SHA-256' }, false, ['sign', 'verify']
-    );
-
-    return { aesKey, hmacKey };
-  }
-
   // ── Key Serialization (for sending to server / persisting) ─────
 
   async function serializeKeyPair(keyPair) {
@@ -501,9 +423,6 @@ const SecureCrypto = (() => {
     // Key generation
     generateIdentityKeyPair,
     generateEphemeralKeyPair,
-    generateGroupKey,
-    wrapGroupKey,
-    unwrapGroupKey,
 
     // Key exchange & derivation
     deriveSessionKey,

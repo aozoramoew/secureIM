@@ -6,7 +6,7 @@ const CHAT_API = '/api/chat';
 let socket = null;
 let currentUser = null;
 let currentPassword = null; // held in memory for storage decryption
-let activeConversation = null; // { type:'dm'|'group', id, sessionId, name }
+let activeConversation = null; // { type:'dm', id, sessionId, name }
 let myEcdhPrivKey = null;      // CryptoKey object (ECDH private, in-memory)
 let myEcdsaPrivKey = null;     // CryptoKey object (ECDSA private, in-memory)
 
@@ -27,26 +27,15 @@ const _offlineUsers = new Set();
 // ── Bootstrap ────────────────────────────────────────────────────
 
 async function initChat() {
-  const token = SecureStorage.getAuthToken();
-  currentUser  = SecureStorage.getUser();
-  if (!token || !currentUser) { window.location.href = '/login'; return; }
-
-  const unlockUsernameEl = document.getElementById('unlock-username');
-  if (unlockUsernameEl) unlockUsernameEl.textContent = currentUser.username;
+  if (!SecureStorage.hasIdentityKeys()) { window.location.href = '/login'; return; }
 
   document.getElementById('unlock-switch-account-btn')?.addEventListener('click', () => {
-    // Wipes this device's local keys/history (the only copy — E2EE), then sends
-    // the user to /login to sign into a different account. Confirm first since
-    // it's irreversible for this account's locally-stored data.
     if (confirm('Switching accounts will remove this account\'s encrypted keys and message history from this device (they cannot be recovered). Continue?')) {
       logout();
     }
   });
 
-  // Prompt for password to unlock local keys. A mistyped password must NOT
-  // wipe local storage — it's the only copy of the private key and message
-  // history (E2EE: nothing usable is stored server-side), so we just let the
-  // user retry instead of calling the destructive logout().
+  // Prompt for password — retry loop so a wrong password never wipes storage.
   let keys = null;
   while (!keys) {
     currentPassword = await promptPassword();
@@ -61,17 +50,21 @@ async function initChat() {
     }
   }
 
+  currentUser = await SecureStorage.getUser(currentPassword);
+  if (!currentUser) { window.location.href = '/login'; return; }
+
+  const unlockUsernameEl = document.getElementById('unlock-username');
+  if (unlockUsernameEl) unlockUsernameEl.textContent = currentUser.username;
+
   myEcdhPrivKey  = await SecureCrypto.importPrivateECDH(keys.ecdhPrivJwk);
-  // Import ECDSA private key for signing
   myEcdsaPrivKey = await crypto.subtle.importKey(
     'jwk', JSON.parse(keys.ecdsaPrivJwk),
     { name: 'ECDSA', namedCurve: 'P-384' }, true, ['sign']
   );
 
   renderCurrentUser();
-  connectSocket(token);
+  connectSocket();
   await loadUserList();
-  await loadGroups();
   applySettings();
 }
 
@@ -96,9 +89,9 @@ function promptPassword() {
 
 // ── SocketIO ─────────────────────────────────────────────────────
 
-function connectSocket(token) {
+function connectSocket() {
   socket = io({
-    auth: { token },
+    withCredentials: true,  // send HttpOnly cookie with SocketIO handshake
     reconnection: true,
     reconnectionDelay: 1000,
     reconnectionAttempts: 10,
@@ -145,15 +138,10 @@ function connectSocket(token) {
   socket.on('receive_message', onReceiveMessage);
   socket.on('message_deleted', onMessageDeleted);
   socket.on('message_read',    onMessageRead);
-  socket.on('group_deleted',    onGroupDeleted);
-  socket.on('group_created',    onGroupCreated);
-  socket.on('group_key_requested', onGroupKeyRequested);
 
   socket.on('typing', d => {
     if (!activeConversation || d.user_id === currentUser.id) return;
-    const match =
-      (activeConversation.type === 'dm'    && d.conversation_type === 'dm'    && activeConversation.id === d.peer_id) ||
-      (activeConversation.type === 'group' && d.conversation_type === 'group' && activeConversation.id === Number(d.group_id));
+    const match = activeConversation.type === 'dm' && d.conversation_type === 'dm' && activeConversation.id === d.peer_id;
     if (match) showTypingIndicator(d.is_typing);
   });
 }
@@ -182,12 +170,12 @@ async function initiateSession(recipientId, recipientUsername) {
   // Track which session belongs to which contact so onSessionReady can verify
   // the responder's signature even when they complete the handshake while
   // this conversation is not the active one.
-  if (recipientUsername) {
-    const contacts = SecureStorage.getContacts();
+  if (recipientUsername && currentPassword) {
+    const contacts = await SecureStorage.getContacts(currentPassword);
     const updated = contacts.map(c =>
       c.id === recipientId ? { ...c, _pendingSessionId: session.id } : c
     );
-    SecureStorage.saveContacts(updated);
+    await SecureStorage.saveContacts(currentPassword, updated);
   }
 
   return session;
@@ -274,11 +262,11 @@ async function onSessionReady(data) {
   // the other side already completed their half. We need to start a fresh
   // handshake — look up who the responder is and re-initiate toward them.
   if (!stored || !stored.myEphemeral) {
-    const resolvedUsername = responder_username
-      || (() => {
-        const contacts = SecureStorage.getContacts();
-        return contacts.find(c => c._pendingSessionId === session_id)?.username;
-      })();
+    let resolvedUsername = responder_username;
+    if (!resolvedUsername && currentPassword) {
+      const contacts = await SecureStorage.getContacts(currentPassword);
+      resolvedUsername = contacts.find(c => c._pendingSessionId === session_id)?.username;
+    }
     if (resolvedUsername && activeConversation?.username === resolvedUsername) {
       console.log('[SecureIM] Lost session state — re-initiating with', resolvedUsername);
       const sess = await initiateSession(activeConversation.id, resolvedUsername);
@@ -290,13 +278,11 @@ async function onSessionReady(data) {
   const isThisSession = activeConversation?.sessionId === session_id;
 
   // ── Verify the responder's ECDSA signature BEFORE computing shared secret ──
-  // Use the device_id from the server event to pick the exact signing device.
-  const verifyUsername = responder_username
-    || (isThisSession ? activeConversation?.username : null)
-    || (() => {
-      const contacts = SecureStorage.getContacts();
-      return contacts.find(c => c._pendingSessionId === session_id)?.username;
-    })();
+  let verifyUsername = responder_username || (isThisSession ? activeConversation?.username : null);
+  if (!verifyUsername && currentPassword) {
+    const contacts = await SecureStorage.getContacts(currentPassword);
+    verifyUsername = contacts.find(c => c._pendingSessionId === session_id)?.username;
+  }
 
   if (verifyUsername && ephemeral_sig_b) {
     const keysRes = await apiGet(`${CHAT_API}/users/${verifyUsername}/keys`);
@@ -356,7 +342,7 @@ async function _redecryptActiveConversation(aesKey, hmacKey) {
   const res = await apiGet(`${CHAT_API}/messages/${otherId}`);
   if (!res.ok) return;
   const { messages } = await res.json();
-  const deviceId = SecureStorage.getDeviceId();
+  const deviceId = await SecureStorage.getDeviceId(currentPassword);
 
   for (const msg of messages) {
     const el = document.getElementById(`msg-${msg.id}`);
@@ -432,13 +418,10 @@ async function _sendMessageInner() {
   input.focus();
 
   const sessionKeys = SecureStorage.getSessionKeys(activeConversation.sessionId);
-  // Use ephemeral session key only when: key exists in RAM AND peer is not marked offline.
-  // Keeping keys in RAM after peer goes offline lets us decrypt our own echoes,
-  // but we must not encrypt new outgoing messages with a key the peer no longer holds.
-  const peerOffline = activeConversation.type === 'dm' && _offlineUsers.has(activeConversation.id);
+  const peerOffline = _offlineUsers.has(activeConversation.id);
   const hasEphemeralSession = !!(sessionKeys?.aesKey) && !peerOffline;
 
-  if (peerOffline && activeConversation.type === 'dm') {
+  if (peerOffline) {
     showAlert('📨 Recipient is offline — message will be delivered when they reconnect.', 'info');
   }
 
@@ -472,71 +455,52 @@ async function _sendMessageInner() {
       return SecureCrypto.encryptMessage(aesKey, hmacKey, text);
     }
 
-    if (activeConversation.type === 'dm') {
-      if (!activeConversation.username) {
-        showAlert('❌ Cannot send: recipient username unknown.', 'error');
-        return;
-      }
+    if (!activeConversation.username) {
+      showAlert('❌ Cannot send: recipient username unknown.', 'error');
+      return;
+    }
 
-      // Fetch recipient devices (cached per username to avoid round-trip on every send)
-      if (!_deviceKeyCache[activeConversation.username]) {
-        const keysRes = await apiGet(`${CHAT_API}/users/${activeConversation.username}/keys`);
-        if (!keysRes.ok) { showAlert('❌ Could not fetch recipient keys.', 'error'); return; }
-        const { devices: d } = await keysRes.json();
-        if (!d?.length) { showAlert('❌ Recipient has no registered devices.', 'error'); return; }
-        _deviceKeyCache[activeConversation.username] = d;
-      }
-      const devices = _deviceKeyCache[activeConversation.username];
+    // Fetch recipient devices (cached per username to avoid round-trip on every send)
+    if (!_deviceKeyCache[activeConversation.username]) {
+      const keysRes = await apiGet(`${CHAT_API}/users/${activeConversation.username}/keys`);
+      if (!keysRes.ok) { showAlert('❌ Could not fetch recipient keys.', 'error'); return; }
+      const { devices: d } = await keysRes.json();
+      if (!d?.length) { showAlert('❌ Recipient has no registered devices.', 'error'); return; }
+      _deviceKeyCache[activeConversation.username] = d;
+    }
+    const devices = _deviceKeyCache[activeConversation.username];
 
-      for (const dev of devices) {
-        if (hasEphemeralSession) {
-          // Fast path: use the shared ephemeral session key (best forward secrecy)
-          const payload = await encryptForDevice(sessionKeys.aesKey, sessionKeys.hmacKey);
-          deviceMap[dev.device_id] = payload;
-        } else {
-          // Offline path: derive one-shot key from recipient's static ECDH public key.
-          // senderEphPub is included so the recipient can derive the same key on their side.
-          const { aesKey, hmacKey, senderEphPub } = await deriveStaticKeys(dev.ecdh_public_key);
-          const payload = await encryptForDevice(aesKey, hmacKey);
-          payload.sender_eph_pub = senderEphPub;  // recipient needs this to derive the key
-          payload.offline_delivery = true;
-          deviceMap[dev.device_id] = payload;
-        }
+    for (const dev of devices) {
+      if (hasEphemeralSession) {
+        const payload = await encryptForDevice(sessionKeys.aesKey, sessionKeys.hmacKey);
+        deviceMap[dev.device_id] = payload;
+      } else {
+        const { aesKey, hmacKey, senderEphPub } = await deriveStaticKeys(dev.ecdh_public_key);
+        const payload = await encryptForDevice(aesKey, hmacKey);
+        payload.sender_eph_pub = senderEphPub;
+        payload.offline_delivery = true;
+        deviceMap[dev.device_id] = payload;
       }
+    }
 
-      // Encrypt for our own devices so we can read our own sent messages (cached)
-      if (!_deviceKeyCache[currentUser.username]) {
-        const myKeysRes = await apiGet(`${CHAT_API}/users/${currentUser.username}/keys`);
-        const { devices: d } = await myKeysRes.json();
-        _deviceKeyCache[currentUser.username] = d || [];
+    // Encrypt for our own devices so we can read our own sent messages (cached)
+    if (!_deviceKeyCache[currentUser.username]) {
+      const myKeysRes = await apiGet(`${CHAT_API}/users/${currentUser.username}/keys`);
+      const { devices: d } = await myKeysRes.json();
+      _deviceKeyCache[currentUser.username] = d || [];
+    }
+    const myDevices = _deviceKeyCache[currentUser.username];
+    for (const dev of myDevices) {
+      if (deviceMap[dev.device_id]) continue;
+      if (hasEphemeralSession) {
+        deviceMap[dev.device_id] = await encryptForDevice(sessionKeys.aesKey, sessionKeys.hmacKey);
+      } else {
+        const { aesKey, hmacKey, senderEphPub } = await deriveStaticKeys(dev.ecdh_public_key);
+        const payload = await encryptForDevice(aesKey, hmacKey);
+        payload.sender_eph_pub = senderEphPub;
+        payload.offline_delivery = true;
+        deviceMap[dev.device_id] = payload;
       }
-      const myDevices = _deviceKeyCache[currentUser.username];
-      for (const dev of myDevices) {
-        if (deviceMap[dev.device_id]) continue;
-        if (hasEphemeralSession) {
-          deviceMap[dev.device_id] = await encryptForDevice(sessionKeys.aesKey, sessionKeys.hmacKey);
-        } else {
-          const { aesKey, hmacKey, senderEphPub } = await deriveStaticKeys(dev.ecdh_public_key);
-          const payload = await encryptForDevice(aesKey, hmacKey);
-          payload.sender_eph_pub = senderEphPub;
-          payload.offline_delivery = true;
-          deviceMap[dev.device_id] = payload;
-        }
-      }
-    } else {
-      // Group: use the group AES key unwrapped from server on openGroup()
-      const groupKeys = SecureStorage.getSessionKeys(activeConversation.sessionId);
-      if (!groupKeys?.aesKey) {
-        // Try to load it now (e.g. if group was opened before key was ready)
-        await _loadGroupKey(activeConversation.id, activeConversation.sessionId);
-        const retried = SecureStorage.getSessionKeys(activeConversation.sessionId);
-        if (!retried?.aesKey) {
-          showAlert('⚠️ Group key not available — cannot send message.', 'warning');
-          return;
-        }
-      }
-      const { aesKey, hmacKey } = SecureStorage.getSessionKeys(activeConversation.sessionId);
-      deviceMap['group'] = await encryptForDevice(aesKey, hmacKey);
     }
 
     // Self-destruct: read expires_seconds from the selector in the input bar
@@ -545,11 +509,9 @@ async function _sendMessageInner() {
 
     socket.emit('send_message', {
       session_id:          activeConversation.sessionId,
-      // Always include recipient_id for DM so server can route even if session_id is null
-      recipient_id:        activeConversation.type === 'dm' ? activeConversation.id : undefined,
-      group_id:            activeConversation.type === 'group' ? activeConversation.id : undefined,
+      recipient_id:        activeConversation.id,
       encrypted_payloads:  deviceMap,
-      msg_type:            activeConversation.type,
+      msg_type:            'dm',
       expires_seconds:     expiresSec || undefined,
     });
 
@@ -594,9 +556,9 @@ async function onReceiveMessage(msg) {
   const isForActiveConversation = convId === getActiveConvId();
 
   // ── Decrypt ──────────────────────────────────────────────────────
-  const deviceId  = SecureStorage.getDeviceId();
+  const deviceId  = await SecureStorage.getDeviceId(currentPassword);
   const payloads  = msg.encrypted_payloads || {};
-  const myPayload = payloads[deviceId] || payloads['group'];
+  const myPayload = payloads[deviceId];
 
   let plaintext = null;
   let mediaObj  = {};
@@ -718,7 +680,6 @@ async function openDM(userId, username) {
   if (avatarEl) { avatarEl.textContent = username[0].toUpperCase(); avatarEl.classList.remove('group-avatar'); }
   document.getElementById('no-chat-placeholder').style.display = 'none';
   document.getElementById('chat-main').style.display = 'flex';
-  document.getElementById('delete-group-btn').style.display = 'none';
 
   updateEncryptionBadge(false);
   setActiveSidebarItem(userId, 'user');
@@ -740,105 +701,7 @@ async function openDM(userId, username) {
   });
 }
 
-async function openGroup(groupId, groupName) {
-  clearMessages();
-  clearAttachment();
-  const sessionId = `grp_${groupId}`;
-  activeConversation = { type: 'group', id: groupId, name: groupName, sessionId };
-  document.getElementById('chat-header-name').textContent = '# ' + groupName;
-  const avatarEl = document.getElementById('chat-header-avatar');
-  if (avatarEl) { avatarEl.textContent = '#'; avatarEl.classList.add('group-avatar'); }
-  document.getElementById('no-chat-placeholder').style.display = 'none';
-  document.getElementById('chat-main').style.display = 'flex';
-  document.getElementById('delete-group-btn').style.display = 'inline-flex';
 
-  setActiveSidebarItem(groupId, 'group');
-  clearUnreadBadge(groupId);
-  updateEncryptionBadge(false);
-
-  // Load our wrapped group key from the server and unwrap it
-  await _loadGroupKey(groupId, sessionId);
-
-  // After load attempt, sync badge with actual key state
-  const loaded = SecureStorage.getSessionKeys(sessionId);
-  updateEncryptionBadge(!!(loaded?.aesKey));
-
-  const convId = `grp_${groupId}`;
-  const history = await SecureStorage.getConversation(currentPassword, convId);
-  history.forEach(m => renderMessage(m, m.sender_id === currentUser.id));
-}
-
-async function _loadGroupKey(groupId, sessionId) {
-  // Already loaded for this session
-  const existing = SecureStorage.getSessionKeys(sessionId);
-  if (existing?.aesKey) return;
-
-  if (!myEcdhPrivKey) {
-    console.error('[_loadGroupKey] myEcdhPrivKey not ready yet');
-    showAlert('⚠️ Keys not unlocked yet — cannot load group key.', 'warning');
-    return;
-  }
-
-  try {
-    const res = await apiGet(`${CHAT_API}/groups/${groupId}/my-key`);
-    if (!res.ok) {
-      const errText = await res.text().catch(() => '');
-      console.error('[_loadGroupKey] HTTP', res.status, errText);
-      showAlert('⚠️ Could not load group key — messages cannot be decrypted.', 'warning');
-      return;
-    }
-    const { bundle } = await res.json();
-    if (!bundle) {
-      console.warn('[_loadGroupKey] no bundle for this device — requesting from group members');
-      // New device: ask online members to re-wrap the key for us
-      const myDeviceId = SecureStorage.getDeviceId();
-      const myKeyRes = await apiGet(`${CHAT_API}/users/${currentUser.username}/keys`);
-      if (myKeyRes.ok) {
-        const { devices: myDevs } = await myKeyRes.json();
-        const myDev = myDevs.find(d => d.device_id === myDeviceId);
-        if (myDev) {
-          socket.emit('request_group_key', {
-            group_id: groupId,
-            device_id: myDeviceId,
-            ecdh_public_key: myDev.ecdh_public_key,
-          });
-          showAlert('🔑 Requesting group key from members — retrying in 3s…', 'info');
-          // Retry loading after a short delay to give a member time to re-wrap
-          setTimeout(() => _loadGroupKey(groupId, sessionId), 3000);
-        }
-      }
-      return;
-    }
-
-    const { aesKey, hmacKey } = await SecureCrypto.unwrapGroupKey(bundle, myEcdhPrivKey);
-    SecureStorage.storeSessionKeys(sessionId, aesKey, hmacKey, null);
-    updateEncryptionBadge(true);
-  } catch (e) {
-    console.error('[_loadGroupKey] unwrapGroupKey failed:', e.message);
-    // Bundle is stale — clear it and request a fresh one from online members.
-    await fetch(`${CHAT_API}/groups/${groupId}/my-key`, {
-      method: 'DELETE',
-      headers: { Authorization: `Bearer ${SecureStorage.getAuthToken()}` },
-    }).catch(() => {});
-    const myDeviceId = SecureStorage.getDeviceId();
-    const myKeyRes = await apiGet(`${CHAT_API}/users/${currentUser.username}/keys`).catch(() => null);
-    if (myKeyRes?.ok) {
-      const { devices: myDevs } = await myKeyRes.json();
-      const myDev = myDevs.find(d => d.device_id === myDeviceId);
-      if (myDev) {
-        socket.emit('request_group_key', {
-          group_id: groupId,
-          device_id: myDeviceId,
-          ecdh_public_key: myDev.ecdh_public_key,
-        });
-        showAlert('🔑 Group key mismatch — requesting fresh key from members…', 'info');
-        setTimeout(() => _loadGroupKey(groupId, sessionId), 3000);
-        return;
-      }
-    }
-    showAlert('❌ Failed to load group key: ' + e.message, 'error');
-  }
-}
 
 // ── CSP-safe DOM builder for messages ────────────────────────────
 // No inline onclick handlers — all listeners attached via addEventListener.
@@ -1070,149 +933,6 @@ async function loadUserList(q = '') {
   }
 }
 
-async function loadGroups() {
-  try {
-    const res = await apiGet(`${CHAT_API}/groups`);
-    if (!res.ok) { console.error('[loadGroups] API error', res.status); return; }
-    const { groups } = await res.json();
-    const list = document.getElementById('groups-list');
-    if (!list) return;
-    list.innerHTML = '';
-    if (!groups || groups.length === 0) return;
-    groups.forEach(g => {
-      const li = document.createElement('li');
-      li.className = 'contact-item';
-      li.setAttribute('data-group-id', g.id);
-
-      li.innerHTML = `<div class="contact-avatar group-avatar">#</div>
-        <div class="contact-info"><span class="contact-name">${escapeHtml(g.name)}</span></div>
-        <span class="unread-badge"></span>`;
-      li.addEventListener('click', () => openGroup(g.id, g.name));
-      list.appendChild(li);
-    });
-  } catch (err) {
-    console.error('[loadGroups] Error:', err);
-  }
-}
-
-// ── Group Creation ───────────────────────────────────────────────
-
-async function createGroup() {
-  const nameEl = document.getElementById('new-group-name');
-  const name = nameEl?.value?.trim();
-  if (!name) return;
-
-  const checked = [...document.querySelectorAll('.member-check:checked')].map(el => +el.value);
-
-  // Generate the group AES+HMAC key pair (shared by all members)
-  const { aesKey, hmacKey } = await SecureCrypto.generateGroupKey();
-
-  // Collect all member user IDs including the creator
-  const allMemberIds = [...new Set([currentUser.id, ...checked])];
-
-  // Fetch device public keys for every member by user_id, wrap group key per device
-  const encryptedKeys = {};  // device_id → wrapped bundle
-  for (const uid of allMemberIds) {
-    const kr = await apiGet(`${CHAT_API}/users/by-id/${uid}/keys`);
-    if (!kr.ok) { console.warn('[createGroup] Failed to fetch keys for uid', uid); continue; }
-    const { devices } = await kr.json();
-    console.log('[createGroup] uid', uid, 'has devices:', devices.map(d => d.device_id));
-    for (const dev of devices) {
-      try {
-        encryptedKeys[dev.device_id] = await SecureCrypto.wrapGroupKey(
-          aesKey, hmacKey, dev.ecdh_public_key
-        );
-        console.log('[createGroup] wrapped key for device', dev.device_id);
-      } catch (e) {
-        console.error('[createGroup] wrapGroupKey failed for device', dev.device_id, e);
-      }
-    }
-  }
-
-  console.log('[createGroup] encryptedKeys device_ids:', Object.keys(encryptedKeys));
-
-  if (Object.keys(encryptedKeys).length === 0) {
-    showAlert('❌ Could not wrap group key for any device. Aborting.', 'error');
-    return;
-  }
-
-  // Create the group on the server
-  const res = await apiPost(`${CHAT_API}/groups`, { name, member_ids: checked });
-  if (!res.ok) { showAlert('❌ Failed to create group', 'error'); return; }
-  const { group } = await res.json();
-  console.log('[createGroup] group created id=', group.id, 'uploading', Object.keys(encryptedKeys).length, 'device bundles');
-
-  // Upload encrypted group keys for all member devices
-  const keysRes = await apiPut(`${CHAT_API}/groups/${group.id}/keys`, { encrypted_keys: encryptedKeys });
-  if (!keysRes.ok) {
-    const errText = await keysRes.text().catch(() => '');
-    console.error('[createGroup] Failed to upload group keys:', keysRes.status, errText);
-    showAlert('❌ Failed to distribute group keys — members may not be able to read messages.', 'error');
-  } else {
-    console.log('[createGroup] group keys uploaded OK');
-  }
-
-  nameEl.value = '';
-  closeModal('group-modal');
-  await loadGroups();
-}
-
-function onGroupCreated(data) {
-  // Avoid duplicate: only reload if this group is not already in the sidebar.
-  const gid = data?.group?.id;
-  if (gid && document.querySelector(`[data-group-id="${gid}"]`)) return;
-  loadGroups();
-}
-
-async function onGroupKeyRequested(data) {
-  // Another member (new device) needs us to re-wrap the group key for their device.
-  const { group_id, device_id, ecdh_public_key } = data;
-  const sessionId = `grp_${group_id}`;
-  const groupKeys = SecureStorage.getSessionKeys(sessionId);
-  if (!groupKeys?.aesKey) return; // We don't have the key either — skip
-
-  try {
-    const bundle = await SecureCrypto.wrapGroupKey(groupKeys.aesKey, groupKeys.hmacKey, ecdh_public_key);
-    await apiPut(`${CHAT_API}/groups/${group_id}/keys`, {
-      encrypted_keys: { [device_id]: bundle },
-    });
-    console.log('[onGroupKeyRequested] re-wrapped key for device', device_id);
-  } catch (e) {
-    console.error('[onGroupKeyRequested] failed to re-wrap key:', e);
-  }
-}
-
-async function deleteGroup(groupId) {
-  if (!confirm('Delete this group and all its messages? This cannot be undone.')) return;
-  const res = await fetch(`${CHAT_API}/groups/${groupId}`, {
-    method: 'DELETE',
-    headers: { 'Authorization': 'Bearer ' + SecureStorage.getAuthToken() },
-  });
-  if (!res.ok) {
-    const err = await res.json().catch(() => ({}));
-    showAlert('❌ ' + (err.detail || 'Failed to delete group'), 'error');
-    return;
-  }
-  // Apply locally immediately — server also emits group_deleted via socket
-  // but the deleter may not receive their own room event reliably.
-  onGroupDeleted({ group_id: groupId });
-}
-
-function onGroupDeleted(data) {
-  const group_id = Number(data.group_id);
-  // Clear UI if we're currently in this group
-  if (activeConversation?.type === 'group' && activeConversation.id === group_id) {
-    activeConversation = null;
-    document.getElementById('chat-main').style.display = 'none';
-    document.getElementById('no-chat-placeholder').style.display = 'flex';
-    document.getElementById('delete-group-btn').style.display = 'none';
-    showAlert('🗑️ This group has been deleted.', 'info');
-  }
-  // Remove from sidebar immediately
-  document.querySelector(`[data-group-id="${group_id}"]`)?.remove();
-  // Clear cached group key
-  SecureStorage.clearSessionKeys(`grp_${group_id}`);
-}
 
 // ── Contact Key Verification ─────────────────────────────────────
 
@@ -1253,9 +973,7 @@ function updateEncryptionBadge(active) {
 
 // ── UI Utilities ─────────────────────────────────────────────────
 
-/** Conversation id for an arbitrary incoming message (mirrors getActiveConvId). */
 function _convIdForMessage(msg) {
-  if (msg.group_id) return `grp_${msg.group_id}`;
   const otherId = msg.sender_id === currentUser.id ? msg.recipient_id : msg.sender_id;
   return `dm_${Math.min(currentUser.id, otherId)}_${Math.max(currentUser.id, otherId)}`;
 }
@@ -1295,10 +1013,7 @@ function _reconcileOutgoing(convId, msg) {
 
 function getActiveConvId() {
   if (!activeConversation) return null;
-  if (activeConversation.type === 'dm') {
-    return `dm_${Math.min(currentUser.id, activeConversation.id)}_${Math.max(currentUser.id, activeConversation.id)}`;
-  }
-  return `grp_${activeConversation.id}`;
+  return `dm_${Math.min(currentUser.id, activeConversation.id)}_${Math.max(currentUser.id, activeConversation.id)}`;
 }
 
 function renderCurrentUser() {
@@ -1369,7 +1084,7 @@ function closeModal(id) {
 }
 
 function logout() {
-  apiPost('/api/auth/logout', {}).catch(() => {});
+  fetch('/api/auth/logout', { method: 'POST', credentials: 'include' }).catch(() => {});
   SecureStorage.clearAll();
   window.location.href = '/login';
 }
@@ -1377,13 +1092,14 @@ function logout() {
 // ── API Helpers ──────────────────────────────────────────────────
 
 function apiGet(url) {
-  return fetch(url, { headers: { Authorization: `Bearer ${SecureStorage.getAuthToken()}` } });
+  return fetch(url, { credentials: 'include' });
 }
 
 function apiPost(url, body) {
   return fetch(url, {
     method: 'POST',
-    headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${SecureStorage.getAuthToken()}` },
+    headers: { 'Content-Type': 'application/json' },
+    credentials: 'include',
     body: JSON.stringify(body),
   });
 }
@@ -1391,7 +1107,8 @@ function apiPost(url, body) {
 function apiPut(url, body) {
   return fetch(url, {
     method: 'PUT',
-    headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${SecureStorage.getAuthToken()}` },
+    headers: { 'Content-Type': 'application/json' },
+    credentials: 'include',
     body: JSON.stringify(body),
   });
 }
@@ -1401,16 +1118,10 @@ function apiPut(url, body) {
 let _typingTimeout = null;
 function onInputTyping() {
   if (!activeConversation) return;
-  const payload = activeConversation.type === 'group'
-    ? { group_id: activeConversation.id, is_typing: true }
-    : { recipient_id: activeConversation.id, is_typing: true };
-  socket?.emit('typing', payload);
+  socket?.emit('typing', { recipient_id: activeConversation.id, is_typing: true });
   clearTimeout(_typingTimeout);
   _typingTimeout = setTimeout(() => {
-    const stopPayload = activeConversation?.type === 'group'
-      ? { group_id: activeConversation.id, is_typing: false }
-      : { recipient_id: activeConversation.id, is_typing: false };
-    socket?.emit('typing', stopPayload);
+    socket?.emit('typing', { recipient_id: activeConversation?.id, is_typing: false });
   }, 2000);
 }
 
@@ -1425,7 +1136,7 @@ function onSearch(e) {
 // ── Init ─────────────────────────────────────────────────────────
 
 document.addEventListener('DOMContentLoaded', () => {
-  if (!SecureStorage.getAuthToken()) { window.location.href = '/login'; return; }
+  if (!SecureStorage.hasIdentityKeys()) { window.location.href = '/login'; return; }
 
   initChat();
 
@@ -1510,34 +1221,7 @@ document.addEventListener('DOMContentLoaded', () => {
     previewClose?.addEventListener('click', clearAttachment);
   }
 
-  document.getElementById('create-group-btn')?.addEventListener('click', createGroup);
-  document.getElementById('group-modal-close')?.addEventListener('click', () => closeModal('group-modal'));
-  document.getElementById('delete-group-btn')?.addEventListener('click', () => {
-    if (activeConversation?.type === 'group') deleteGroup(activeConversation.id);
-  });
-
-  document.getElementById('open-group-modal-btn')?.addEventListener('click', () => {
-    const overlay = document.getElementById('group-modal');
-    if (overlay) overlay.classList.add('open');
-    const memberList = document.getElementById('member-list');
-    if (memberList) {
-      memberList.innerHTML = '<div style="color:var(--text-3); font-size:13px; text-align:center;">Loading users...</div>';
-      apiGet(`${CHAT_API}/users`).then(r => r.json()).then(data => {
-        memberList.innerHTML = '';
-        data.users.forEach(u => {
-          _userMap[u.id] = u;  // keep map in sync
-          if (u.id === currentUser.id) return;
-          const div = document.createElement('div');
-          div.className = 'member-item';
-          div.innerHTML = `<label for="chk-${u.id}">${escapeHtml(u.username)}</label>
-                           <input type="checkbox" id="chk-${u.id}" class="member-check" value="${u.id}">`;
-          memberList.appendChild(div);
-        });
-      }).catch(() => memberList.innerHTML = '<div style="color:var(--text-err); font-size:13px;">Error loading users</div>');
-    }
-  });
-
-  // ── Theme toggle (C5) ────────────────────────────────────────
+  // ── Theme toggle ────────────────────────────────────────
   const themeBtn = document.getElementById('theme-btn');
   const applyTheme = (theme) => {
     document.documentElement.setAttribute('data-theme', theme);

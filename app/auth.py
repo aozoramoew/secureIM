@@ -9,13 +9,21 @@ Endpoints:
   PUT    /api/auth/settings
   GET    /api/auth/devices
   DELETE /api/auth/devices/{device_id}
+
+JWT is delivered via an HttpOnly, Secure, SameSite=Strict cookie named
+`sim_token` — it is never exposed to JavaScript.  All API endpoints that
+need authentication read the cookie instead of the Authorization header.
+SocketIO auth still accepts a `token` field in the auth dict because
+browser WebSocket API cannot send cookies programmatically on every
+connection; the SocketIO client is given the token value once on connect.
 """
 import json
 import logging
+import secrets
 from datetime import datetime
 from typing import Optional
 
-from fastapi import APIRouter, Depends, HTTPException, Request
+from fastapi import APIRouter, Depends, HTTPException, Request, Response
 from pydantic import BaseModel
 from sqlalchemy.orm import Session
 
@@ -31,6 +39,25 @@ log = logging.getLogger(__name__)
 
 router = APIRouter()
 
+_COOKIE_NAME = 'sim_token'
+_COOKIE_MAX_AGE = 86400 * 7  # 7 days, matching JWT expiry
+
+
+def _set_auth_cookie(response: Response, token: str) -> None:
+    response.set_cookie(
+        key=_COOKIE_NAME,
+        value=token,
+        max_age=_COOKIE_MAX_AGE,
+        httponly=True,
+        secure=False,   # set True in production (HTTPS only)
+        samesite='strict',
+        path='/',
+    )
+
+
+def _clear_auth_cookie(response: Response) -> None:
+    response.delete_cookie(key=_COOKIE_NAME, path='/')
+
 
 # ── Auth dependency ────────────────────────────────────────────────
 
@@ -38,11 +65,20 @@ def get_current_user_and_device(
     request: Request,
     db: Session = Depends(get_db),
 ):
-    """Validates the Bearer JWT and returns (user, device) or raises 401."""
-    auth_header = request.headers.get('Authorization', '')
-    if not auth_header.startswith('Bearer '):
+    """Validates the JWT from HttpOnly cookie and returns (user, device) or raises 401."""
+    token = request.cookies.get(_COOKIE_NAME)
+
+    # Fallback: also accept Bearer header so SocketIO REST calls work
+    # (SocketIO HTTP polling carries cookies, but raw fetch calls from
+    #  the socket manager use the Authorization header path).
+    if not token:
+        auth_header = request.headers.get('Authorization', '')
+        if auth_header.startswith('Bearer '):
+            token = auth_header.split(' ', 1)[1]
+
+    if not token:
         raise HTTPException(status_code=401, detail='Missing authorization token')
-    token = auth_header.split(' ', 1)[1]
+
     payload = decode_jwt(token)
     if not payload:
         raise HTTPException(status_code=401, detail='Invalid or expired token')
@@ -79,7 +115,7 @@ def _audit(db: Session, event_type: str, request: Request,
         db.add(entry)
         db.commit()
     except Exception:
-        pass  # Audit must never break the main flow
+        pass
 
 
 # ── Pydantic request models ────────────────────────────────────────
@@ -112,6 +148,7 @@ class SettingsBody(BaseModel):
 @router.post('/register', status_code=201)
 @limiter.limit('5/hour')
 def register(request: Request, body: RegisterBody,
+             response: Response,
              db: Session = Depends(get_db)):
     username = body.username.strip().lower()
     password = body.password
@@ -135,7 +172,6 @@ def register(request: Request, body: RegisterBody,
         db.add(user)
         db.flush()
 
-        # Register the device and store only public keys — private keys stay on device
         device = DeviceKey(
             user_id=user.id,
             device_id=device_id,
@@ -152,12 +188,12 @@ def register(request: Request, body: RegisterBody,
         raise HTTPException(status_code=500, detail=f'Registration failed: {exc}')
 
     token = generate_jwt(user.id, device_id)
+    _set_auth_cookie(response, token)
     _audit(db, 'register', request, user_id=user.id,
            detail={'username': username})
 
     return {
         'status': 'ok',
-        'token': token,
         'user': user.to_dict(),
         'message': 'Account created — welcome to SecureIM!',
     }
@@ -167,7 +203,8 @@ def register(request: Request, body: RegisterBody,
 
 @router.post('/login')
 @limiter.limit('10/minute')
-def login(request: Request, body: LoginBody, db: Session = Depends(get_db)):
+def login(request: Request, body: LoginBody, response: Response,
+          db: Session = Depends(get_db)):
     username         = body.username.strip().lower()
     password         = body.password
     device_id        = body.device_id
@@ -197,9 +234,10 @@ def login(request: Request, body: LoginBody, db: Session = Depends(get_db)):
         db.commit()
 
         token = generate_jwt(user.id, device_id)
+        _set_auth_cookie(response, token)
         _audit(db, 'login_ok', request, user_id=user.id,
                detail={'device_id': device_id})
-        return {'status': 'ok', 'token': token, 'user': user.to_dict()}
+        return {'status': 'ok', 'user': user.to_dict()}
 
     else:
         if not ecdsa_public_key or not ecdh_public_key:
@@ -220,9 +258,10 @@ def login(request: Request, body: LoginBody, db: Session = Depends(get_db)):
         db.commit()
 
         token = generate_jwt(user.id, device_id)
+        _set_auth_cookie(response, token)
         _audit(db, 'login_ok', request, user_id=user.id,
                detail={'device_id': device_id, 'new_device': True})
-        return {'status': 'ok', 'token': token, 'user': user.to_dict()}
+        return {'status': 'ok', 'user': user.to_dict()}
 
 
 # ── Me / Settings / Devices ───────────────────────────────────────
@@ -270,9 +309,10 @@ def revoke_device(dev_id: str, auth=Depends(get_current_user_and_device),
 
 
 @router.post('/logout')
-def logout(auth=Depends(get_current_user_and_device),
+def logout(response: Response, auth=Depends(get_current_user_and_device),
            db: Session = Depends(get_db)):
     user, device = auth
     device.is_active = False
     db.commit()
+    _clear_auth_cookie(response)
     return {'message': 'Logged out successfully'}

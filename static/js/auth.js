@@ -1,16 +1,24 @@
 /**
  * auth.js — Registration and Login UI Logic
+ *
+ * JWT is stored in an HttpOnly cookie set by the server — not in JS.
+ * Client code never reads or writes the JWT token directly.
  */
 
 const API = '/api/auth';
 
 // ── Device Identity ─────────────────────────────────────────────
+// Before login we have no password → store device ID temporarily in
+// a separate unencrypted key.  After login succeeds we encrypt it
+// under the user's password and remove the temp key.
+
+const _TMP_DEVICE_KEY = 'sim_tmp_device_id';
 
 function getOrCreateDeviceId() {
-  let id = SecureStorage.getDeviceId();
+  let id = localStorage.getItem(_TMP_DEVICE_KEY);
   if (!id) {
     id = crypto.randomUUID();
-    SecureStorage.saveDeviceId(id);
+    localStorage.setItem(_TMP_DEVICE_KEY, id);
   }
   return id;
 }
@@ -82,9 +90,8 @@ async function handleRegister(e) {
   setStatus('reg-status', '🔑 Generating cryptographic identity keys…', 'info');
 
   try {
-    // 1. Generate identity key pairs on-device
-    const identityKP = await SecureCrypto.generateIdentityKeyPair();  // ECDSA P-384
-    const ecdhKP     = await SecureCrypto.generateEphemeralKeyPair(); // ECDH P-256
+    const identityKP = await SecureCrypto.generateIdentityKeyPair();
+    const ecdhKP     = await SecureCrypto.generateEphemeralKeyPair();
 
     const ecdsaPubJwk  = await SecureCrypto.exportKeyJWK(identityKP.publicKey);
     const ecdhPubJwk   = await SecureCrypto.exportKeyJWK(ecdhKP.publicKey);
@@ -96,15 +103,18 @@ async function handleRegister(e) {
 
     setStatus('reg-status', '🔒 Encrypting private keys with your password…', 'info');
 
-    // 2. Encrypt private keys with password — never sent to server
-    await SecureStorage.saveIdentityKeys(password, ecdsaPrivJwk, ecdhPrivJwk);
+    // Initialise per-user salt before saving any encrypted data
+    SecureStorage.initSalt(username);
+
+    // Encrypt and persist private keys
+    await SecureStorage.saveIdentityKeys(password, ecdsaPrivJwk, ecdhPrivJwk, username);
 
     setStatus('reg-status', '📡 Registering with server…', 'info');
 
-    // 3. Send public keys + credentials to server (private keys never leave device)
     const res = await fetch(`${API}/register`, {
-      method:  'POST',
-      headers: { 'Content-Type': 'application/json' },
+      method:      'POST',
+      headers:     { 'Content-Type': 'application/json' },
+      credentials: 'include',   // receive HttpOnly cookie
       body: JSON.stringify({
         username, password,
         ecdsa_public_key: ecdsaPubJwk,
@@ -128,9 +138,12 @@ async function handleRegister(e) {
       throw new Error(detail.length > 200 ? detail.slice(0, 200) + '…' : detail);
     }
 
-    SecureStorage.saveAuthToken(data.token);
-    SecureStorage.saveUser(data.user);
-    SecureStorage.saveSettings(data.user.settings || {});
+    // Encrypt and store all sensitive client-side data under the user's password
+    await SecureStorage.saveDeviceId(password, deviceId);
+    await SecureStorage.saveUser(password, data.user);
+    await SecureStorage.saveSettings(password, data.user.settings || {});
+    localStorage.removeItem(_TMP_DEVICE_KEY);
+
     setStatus('reg-status', '✅ Account created! Redirecting…', 'success');
     window.location.href = '/chat';
 
@@ -198,7 +211,9 @@ async function handleLogin(e) {
       ecdhPubJwk  = await SecureCrypto.exportKeyJWK(ecdhKP.publicKey);
       const ecdsaPrivJwk = await SecureCrypto.exportKeyJWK(identityKP.privateKey);
       const ecdhPrivJwk  = await SecureCrypto.exportKeyJWK(ecdhKP.privateKey);
-      await SecureStorage.saveIdentityKeys(password, ecdsaPrivJwk, ecdhPrivJwk);
+
+      SecureStorage.initSalt(username);
+      await SecureStorage.saveIdentityKeys(password, ecdsaPrivJwk, ecdhPrivJwk, username);
     }
 
     const deviceId   = getOrCreateDeviceId();
@@ -207,8 +222,9 @@ async function handleLogin(e) {
     setStatus('login-status', '📡 Authenticating…', 'info');
 
     const res = await fetch(`${API}/login`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
+      method:      'POST',
+      headers:     { 'Content-Type': 'application/json' },
+      credentials: 'include',   // receive HttpOnly cookie
       body: JSON.stringify({
         username, password, device_id: deviceId, device_name: deviceName,
         ecdsa_public_key: ecdsaPubJwk, ecdh_public_key: ecdhPubJwk,
@@ -225,9 +241,12 @@ async function handleLogin(e) {
     }
 
     if (res.status === 200 && data.status === 'ok') {
-      SecureStorage.saveAuthToken(data.token);
-      SecureStorage.saveUser(data.user);
-      SecureStorage.saveSettings(data.user.settings || {});
+      // Ensure salt is initialised for this username (idempotent)
+      SecureStorage.initSalt(username);
+      await SecureStorage.saveDeviceId(password, deviceId);
+      await SecureStorage.saveUser(password, data.user);
+      await SecureStorage.saveSettings(password, data.user.settings || {});
+      localStorage.removeItem(_TMP_DEVICE_KEY);
       window.location.href = '/chat';
     } else {
       const detail = data.detail || data.error || rawText || `HTTP ${res.status}`;
@@ -242,12 +261,18 @@ async function handleLogin(e) {
 
 // ── Page Init ───────────────────────────────────────────────────
 
-document.addEventListener('DOMContentLoaded', () => {
-  if (SecureStorage.getAuthToken() && SecureStorage.getUser()) {
-    const path = window.location.pathname;
-    if (path === '/login' || path === '/register') {
-      window.location.href = '/chat';
-      return;
+document.addEventListener('DOMContentLoaded', async () => {
+  // Check if already authenticated by probing /api/auth/me (cookie-based)
+  const path = window.location.pathname;
+  if (path === '/login' || path === '/register') {
+    if (SecureStorage.hasIdentityKeys()) {
+      try {
+        const r = await fetch(`${API}/me`, { credentials: 'include' });
+        if (r.ok) {
+          window.location.href = '/chat';
+          return;
+        }
+      } catch { /* not logged in */ }
     }
   }
 

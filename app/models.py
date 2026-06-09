@@ -30,13 +30,12 @@ class User(Base):
     settings          = Column(Text, default='{"store_history":true,"session_mode":false}')
 
     # Relationships
-    devices           = relationship('DeviceKey', backref='user',      lazy='dynamic',
-                                     foreign_keys='DeviceKey.user_id')
-    sent_msgs         = relationship('Message',   backref='sender',    lazy='dynamic',
-                                     foreign_keys='Message.sender_id')
-    recv_msgs         = relationship('Message',   backref='recipient', lazy='dynamic',
-                                     foreign_keys='Message.recipient_id')
-    group_memberships = relationship('GroupMember', backref='user',    lazy='dynamic')
+    devices   = relationship('DeviceKey', backref='user',      lazy='dynamic',
+                             foreign_keys='DeviceKey.user_id')
+    sent_msgs = relationship('Message',   backref='sender',    lazy='dynamic',
+                             foreign_keys='Message.sender_id')
+    recv_msgs = relationship('Message',   backref='recipient', lazy='dynamic',
+                             foreign_keys='Message.recipient_id')
 
     def get_settings(self):
         return json.loads(self.settings or '{}')
@@ -86,10 +85,7 @@ class Message(Base):
 
     id           = Column(Integer, primary_key=True)
     sender_id    = Column(Integer, ForeignKey('users.id'), nullable=False)
-    # For 1-on-1 chat
     recipient_id = Column(Integer, ForeignKey('users.id'), nullable=True)
-    # For group chat
-    group_id     = Column(Integer, ForeignKey('groups.id'), nullable=True)
 
     # E2EE payload — JSON: {device_id: {ciphertext, nonce, hmac}, ...}
     # Server never stores plaintext.
@@ -126,7 +122,6 @@ class Message(Base):
             'id':               self.id,
             'sender_id':        self.sender_id,
             'recipient_id':     self.recipient_id,
-            'group_id':         self.group_id,
             'encrypted_payloads': json.loads(self.encrypted_payloads),
             'timestamp':        self.timestamp.isoformat(),
             'is_deep_deleted':  self.is_deep_deleted,
@@ -135,48 +130,6 @@ class Message(Base):
             'delivered_at':     self.delivered_at.isoformat() if self.delivered_at else None,
             'read_at':          self.read_at.isoformat() if self.read_at else None,
         }
-
-
-# ─────────────────────────────────────────────
-#  Group Chat
-# ─────────────────────────────────────────────
-
-class Group(Base):
-    __tablename__ = 'groups'
-
-    id         = Column(Integer, primary_key=True)
-    name       = Column(String(100), nullable=False)
-    created_by = Column(Integer, ForeignKey('users.id'), nullable=False)
-    created_at = Column(DateTime, default=datetime.utcnow)
-    # Increment when group key is rotated (new member joins / member leaves)
-    key_version = Column(Integer, default=1)
-
-    members  = relationship('GroupMember', backref='group', lazy='dynamic')
-    messages = relationship('Message',     backref='group', lazy='dynamic')
-
-    def to_dict(self):
-        return {
-            'id':          self.id,
-            'name':        self.name,
-            'created_by':  self.created_by,
-            'created_at':  self.created_at.isoformat(),
-            'key_version': self.key_version,
-        }
-
-
-class GroupMember(Base):
-    __tablename__ = 'group_members'
-
-    id        = Column(Integer, primary_key=True)
-    group_id  = Column(Integer, ForeignKey('groups.id'), nullable=False)
-    user_id   = Column(Integer, ForeignKey('users.id'),  nullable=False)
-    is_admin  = Column(Boolean, default=False)
-    joined_at = Column(DateTime, default=datetime.utcnow)
-    # Encrypted copy of group AES key for this member, per device
-    # JSON: {device_id: encrypted_group_key_base64, ...}
-    encrypted_group_keys = Column(Text, default='{}')
-
-    __table_args__ = (UniqueConstraint('group_id', 'user_id'),)
 
 
 # ─────────────────────────────────────────────

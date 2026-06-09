@@ -70,13 +70,6 @@
     </div>
     <ul id="contacts-list" class="contacts-list"></ul>
 
-    <!-- Groups -->
-    <div class="section-label">
-      Groups
-      <button id="open-group-modal-btn" title="New group">＋</button>
-    </div>
-    <ul id="groups-list" class="contacts-list"></ul>
-
     <!-- Settings footer -->
     <div class="sidebar-footer">
       <div class="sidebar-footer-info">🔒 E2EE · Keys never leave your device</div>
@@ -106,7 +99,6 @@
           <div class="chat-header-status" id="chat-header-status"></div>
         </div>
         <div id="enc-status-badge" class="enc-badge pending">⏳ Establishing…</div>
-        <button id="delete-group-btn" class="icon-btn header-danger-btn" title="Delete group" style="display:none;">🗑️</button>
       </div>
 
       <!-- Messages -->
@@ -154,25 +146,6 @@
 
 <!-- ── Alert Toast ───────────────────────────────────────────── -->
 <div id="chat-alert" class="toast-container"></div>
-
-<!-- ── Group Modal ───────────────────────────────────────────── -->
-<div class="modal-overlay" id="group-modal">
-  <div class="modal-box">
-    <div class="modal-header">
-      <span class="modal-title">Create Group</span>
-      <button class="modal-close" id="group-modal-close">✕</button>
-    </div>
-    <div class="field">
-      <label for="new-group-name">Group Name</label>
-      <input type="text" id="new-group-name" placeholder="e.g. Team Alpha">
-    </div>
-    <div class="section-label" style="padding:10px 0 6px;">Add Members</div>
-    <div class="member-list" id="member-list"></div>
-    <button id="create-group-btn" class="btn btn-primary" style="margin-top:16px;">
-      <span class="btn-text">Create Group</span>
-    </button>
-  </div>
-</div>
 
 <script src="/static/js/socket.io.min.js"></script>
 <script src="/static/js/crypto.js"></script>

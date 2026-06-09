@@ -35,6 +35,15 @@ async function initChat() {
     }
   });
 
+  // Pre-populate the "Unlocking as …" label from the stored salt meta (before password known).
+  try {
+    const meta = JSON.parse(localStorage.getItem('sim_storage_meta') || '{}');
+    if (meta.username) {
+      const el = document.getElementById('unlock-username');
+      if (el) el.textContent = meta.username;
+    }
+  } catch { /* ignore */ }
+
   // Prompt for password — retry loop so a wrong password never wipes storage.
   let keys = null;
   while (!keys) {
@@ -51,7 +60,18 @@ async function initChat() {
   }
 
   currentUser = await SecureStorage.getUser(currentPassword);
-  if (!currentUser) { window.location.href = '/login'; return; }
+  if (!currentUser) {
+    // Fallback: user data missing from encrypted storage (e.g. stored with old plaintext
+    // code before the encrypted-storage upgrade). Re-fetch from server and re-save.
+    try {
+      const meRes = await fetch('/api/auth/me', { credentials: 'include' });
+      if (!meRes.ok) { window.location.href = '/login'; return; }
+      const { user } = await meRes.json();
+      await SecureStorage.saveUser(currentPassword, user);
+      await SecureStorage.saveSettings(currentPassword, user.settings || {});
+      currentUser = user;
+    } catch { window.location.href = '/login'; return; }
+  }
 
   const unlockUsernameEl = document.getElementById('unlock-username');
   if (unlockUsernameEl) unlockUsernameEl.textContent = currentUser.username;
@@ -959,7 +979,9 @@ async function verifyContact(contactId, username) {
 // store_history is always ON — messages are encrypted locally with PBKDF2 key.
 // Ephemeral session keys are always used for forward secrecy; they live in RAM only.
 function applySettings() {
-  SecureStorage.saveSettings({ store_history: true, session_mode: false });
+  if (currentPassword) {
+    SecureStorage.saveSettings(currentPassword, { store_history: true, session_mode: false });
+  }
 }
 
 // ── Encryption Status Badge ────────────────────────────────────────

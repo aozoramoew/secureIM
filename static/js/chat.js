@@ -735,6 +735,10 @@ async function openGroup(groupId, groupName) {
   // Load our wrapped group key from the server and unwrap it
   await _loadGroupKey(groupId, sessionId);
 
+  // After load attempt, sync badge with actual key state
+  const loaded = SecureStorage.getSessionKeys(sessionId);
+  updateEncryptionBadge(!!(loaded?.aesKey));
+
   const convId = `grp_${groupId}`;
   const history = await SecureStorage.getConversation(currentPassword, convId);
   history.forEach(m => renderMessage(m, m.sender_id === currentUser.id));

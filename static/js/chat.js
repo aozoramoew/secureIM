@@ -408,6 +408,11 @@ async function sendMessage() {
   if (!text && !currentAttachment) return;
   if (!activeConversation) return;
 
+  if (!socket?.connected) {
+    showAlert('⚠️ Not connected — please wait and try again.', 'warning');
+    return;
+  }
+
   input.value = '';
   input.focus();
 
@@ -523,9 +528,8 @@ async function sendMessage() {
 
     socket.emit('send_message', {
       session_id:          activeConversation.sessionId,
-      // Include recipient_id for offline delivery so server can route without a session
-      recipient_id:        (!hasEphemeralSession && activeConversation.type === 'dm')
-                             ? activeConversation.id : undefined,
+      // Always include recipient_id for DM so server can route even if session_id is null
+      recipient_id:        activeConversation.type === 'dm' ? activeConversation.id : undefined,
       group_id:            activeConversation.type === 'group' ? activeConversation.id : undefined,
       encrypted_payloads:  deviceMap,
       msg_type:            activeConversation.type,
@@ -1114,7 +1118,11 @@ async function deleteGroup(groupId) {
   if (!res.ok) {
     const err = await res.json().catch(() => ({}));
     showAlert('❌ ' + (err.detail || 'Failed to delete group'), 'error');
+    return;
   }
+  // Apply locally immediately — server also emits group_deleted via socket
+  // but the deleter may not receive their own room event reliably.
+  onGroupDeleted({ group_id: groupId });
 }
 
 function onGroupDeleted(data) {

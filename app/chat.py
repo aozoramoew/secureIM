@@ -216,14 +216,13 @@ async def send_message(sid, data):
             recipient_id = data.get('recipient_id')
             sess = db.get(ChatSession, session_id) if session_id else None
 
-            # Offline delivery: client sends recipient_id directly when no live
-            # session exists (payload was encrypted with recipient's static ECDH key).
-            if not sess and recipient_id:
-                recipient_id = int(recipient_id)
-            elif sess and sess.is_active:
+            # Resolve recipient: prefer session (authoritative), fall back to explicit id.
+            if sess and sess.is_active:
                 recipient_id = (
                     sess.user_b_id if sess.user_a_id == sender.id else sess.user_a_id
                 )
+            elif recipient_id:
+                recipient_id = int(recipient_id)
             else:
                 return  # no session and no recipient_id — reject
 

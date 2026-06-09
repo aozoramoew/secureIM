@@ -1,6 +1,5 @@
 /**
- * auth.js — Registration, Login, and 2FA UI Logic
- * Updated for FastAPI backend + real email verification flow.
+ * auth.js — Registration and Login UI Logic
  */
 
 const API = '/api/auth';
@@ -49,7 +48,6 @@ function setBtnLoading(btnId, loading, defaultText = 'Submit') {
   else btn.classList.remove('loading');
 }
 
-// Password strength
 function updateStrengthBar(password) {
   const bar = document.getElementById('strength-bar');
   if (!bar) return;
@@ -86,8 +84,8 @@ async function handleRegister(e) {
 
   try {
     // 1. Generate identity key pairs on-device
-    const identityKP  = await SecureCrypto.generateIdentityKeyPair();   // ECDSA P-384
-    const ecdhKP      = await SecureCrypto.generateEphemeralKeyPair();   // ECDH P-256
+    const identityKP = await SecureCrypto.generateIdentityKeyPair();  // ECDSA P-384
+    const ecdhKP     = await SecureCrypto.generateEphemeralKeyPair(); // ECDH P-256
 
     const ecdsaPubJwk  = await SecureCrypto.exportKeyJWK(identityKP.publicKey);
     const ecdhPubJwk   = await SecureCrypto.exportKeyJWK(ecdhKP.publicKey);
@@ -130,16 +128,11 @@ async function handleRegister(e) {
       throw new Error(data.detail || data.error || 'Registration failed');
     }
 
-    // Registration returns JWT + user — save and redirect to chat
-    if (data.token && data.user) {
-      SecureStorage.saveAuthToken(data.token);
-      SecureStorage.saveUser(data.user);
-      SecureStorage.saveSettings(data.user.settings || {});
-      setStatus('reg-status', '✅ Account created! Redirecting…', 'success');
-      window.location.href = '/chat';
-    } else {
-      setStatus('reg-status', '✅ ' + (data.message || 'Done!'), 'success');
-    }
+    SecureStorage.saveAuthToken(data.token);
+    SecureStorage.saveUser(data.user);
+    SecureStorage.saveSettings(data.user.settings || {});
+    setStatus('reg-status', '✅ Account created! Redirecting…', 'success');
+    window.location.href = '/chat';
 
   } catch (err) {
     setStatus('reg-status', '❌ ' + err.message, 'error');
@@ -148,23 +141,7 @@ async function handleRegister(e) {
   }
 }
 
-function showEmailCheckPanel(email) {
-  const formWrap = document.getElementById('register-form-wrap');
-  const panel    = document.getElementById('email-check-panel');
-  const emailDisplay = document.getElementById('reg-email-display');
-
-  if (formWrap) formWrap.style.display = 'none';
-  if (panel)    panel.style.display    = 'block';
-  if (emailDisplay) emailDisplay.textContent = email;
-
-  // Pre-fill resend email input
-  const resendInput = document.getElementById('resend-email');
-  if (resendInput) resendInput.value = email;
-}
-
 // ── Login ────────────────────────────────────────────────────────
-
-let _2faPollInterval = null;
 
 async function handleLogin(e) {
   e.preventDefault();
@@ -248,12 +225,10 @@ async function handleLogin(e) {
     }
 
     if (res.status === 200 && data.status === 'ok') {
-      // Login successful — save credentials and redirect to chat
       SecureStorage.saveAuthToken(data.token);
       SecureStorage.saveUser(data.user);
       SecureStorage.saveSettings(data.user.settings || {});
       window.location.href = '/chat';
-
     } else {
       throw new Error(data.detail || data.error || 'Login failed');
     }
@@ -264,209 +239,9 @@ async function handleLogin(e) {
   }
 }
 
-function show2FAWaiting(deviceId) {
-  const formWrap = document.getElementById('login-form-wrap');
-  const waiting  = document.getElementById('two-fa-waiting');
-  if (formWrap) formWrap.style.display = 'none';
-  if (waiting)  waiting.style.display  = 'block';
-
-  // Poll for authorization every 3 seconds
-  _2faPollInterval = setInterval(async () => {
-    try {
-      const res  = await fetch(`${API}/2fa-status?device_id=${deviceId}`);
-      const data = await res.json();
-      if (data.status === 'authorized') {
-        clearInterval(_2faPollInterval);
-        SecureStorage.saveAuthToken(data.token);
-        SecureStorage.saveUser(data.user);
-        SecureStorage.saveSettings(data.user.settings || {});
-        window.location.href = '/chat';
-      }
-    } catch { /* ignore network errors during polling */ }
-  }, 3000);
-}
-
-function cancel2FA() {
-  if (_2faPollInterval) clearInterval(_2faPollInterval);
-  const formWrap = document.getElementById('login-form-wrap');
-  const waiting  = document.getElementById('two-fa-waiting');
-  if (formWrap) formWrap.style.display = 'block';
-  if (waiting)  waiting.style.display  = 'none';
-  setStatus('login-status', '', 'info');
-  setBtnLoading('login-btn', false, 'Sign In');
-}
-
-function showResendSection() {
-  const section = document.getElementById('resend-section');
-  if (section) section.classList.add('visible');
-}
-
-// ── Resend Verification Email ────────────────────────────────────
-
-async function handleResendVerification(e) {
-  e.preventDefault();
-  const email = document.getElementById('resend-email').value.trim();
-  if (!email) {
-    return setStatus('resend-status', 'Please enter your email address.', 'error');
-  }
-
-  const btn = document.getElementById('resend-btn');
-  if (btn) { btn.disabled = true; btn.querySelector('.btn-text').textContent = 'Sending…'; }
-  setStatus('resend-status', '📡 Sending verification email…', 'info');
-
-  try {
-    const res  = await fetch(`${API}/resend-verification`, {
-      method:  'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body:    JSON.stringify({ email }),
-    });
-    const data = await res.json();
-
-    if (!res.ok) {
-      setStatus('resend-status', '❌ ' + (data.detail || data.error || 'Failed to send'), 'error');
-    } else {
-      setStatus('resend-status', '✅ ' + data.message, 'success');
-      // In dev mode, auto-show the dev link modal
-      await checkAndShowDevLink('resend-status');
-    }
-  } catch {
-    setStatus('resend-status', '❌ Network error. Please try again.', 'error');
-  } finally {
-    setTimeout(() => {
-      if (btn) {
-        btn.disabled = false;
-        btn.querySelector('.btn-text').textContent = 'Resend Verification Email';
-      }
-    }, 5000);
-  }
-}
-
-// ── Dev Mode: Show Email Links ───────────────────────────────────
-
-async function checkAndShowDevLink(nearElementId) {
-  try {
-    const res = await fetch(`${API}/dev-links`);
-    if (!res.ok) return;  // Not in dev mode
-    const data = await res.json();
-    if (data.links && data.links.length > 0) {
-      showDevEmailModal(data.links[0]);
-    }
-  } catch { /* production — dev-links not available */ }
-}
-
-function showDevEmailModal(entry) {
-  const old = document.getElementById('dev-email-modal');
-  if (old) old.remove();
-
-  const modal = document.createElement('div');
-  modal.id = 'dev-email-modal';
-  modal.className = 'dev-modal-backdrop';
-
-  modal.innerHTML = `
-    <div class="dev-modal">
-      <div class="dev-modal-header">
-        <span style="font-size:24px;">🛠️</span>
-        <div>
-          <h2>Dev Mode — Email Suppressed</h2>
-          <p style="color:var(--text-3);font-size:12px;margin:2px 0 0;">
-            MAIL_SUPPRESS_SEND=true · Email was not actually sent
-          </p>
-        </div>
-      </div>
-      <div class="dev-link-box">
-        <p style="margin:0 0 4px;font-size:12px;color:var(--text-3);">To: <strong style="color:var(--text);">${entry.to}</strong></p>
-        <p style="margin:0 0 10px;font-size:12px;color:var(--text-3);">Subject: ${entry.subject}</p>
-        <p style="margin:0 0 8px;font-size:12px;color:var(--text-2);">Click the link to complete the action:</p>
-        <a href="${entry.link}" target="_blank">${entry.link}</a>
-      </div>
-      <div class="dev-modal-actions">
-        <a href="${entry.link}" target="_blank" class="btn btn-primary btn-sm"
-           style="width:auto;text-decoration:none;">✅ Open Link</a>
-        <button id="dev-copy-btn" class="btn btn-secondary btn-sm" style="width:auto;">
-          📋 Copy
-        </button>
-        <button id="dev-all-links-btn" class="btn btn-ghost btn-sm" style="width:auto;">
-          📬 All links
-        </button>
-        <button id="dev-close-btn" class="btn btn-ghost btn-sm" style="width:auto; margin-left:auto;">
-          ✕ Close
-        </button>
-      </div>
-    </div>
-  `;
-
-  modal.querySelector('#dev-copy-btn').addEventListener('click', function () {
-    navigator.clipboard.writeText(entry.link);
-    this.textContent = '✓ Copied!';
-    setTimeout(() => { this.textContent = '📋 Copy'; }, 1500);
-  });
-  modal.querySelector('#dev-all-links-btn').addEventListener('click', () => openDevLinks());
-  modal.querySelector('#dev-close-btn').addEventListener('click', () => modal.remove());
-  modal.addEventListener('click', (e) => { if (e.target === modal) modal.remove(); });
-  document.body.appendChild(modal);
-}
-
-async function openDevLinks() {
-  try {
-    const res  = await fetch(`${API}/dev-links`);
-    if (!res.ok) {
-      alert('Dev links only available with MAIL_SUPPRESS_SEND=true.');
-      return;
-    }
-    const data = await res.json();
-    const old  = document.getElementById('dev-email-modal');
-    if (old) old.remove();
-
-    const modal = document.createElement('div');
-    modal.id = 'dev-email-modal';
-    modal.className = 'dev-modal-backdrop';
-
-    const links = data.links || [];
-    const rows  = links.map(entry => `
-      <div class="dev-link-box" style="margin-bottom:10px;">
-        <div style="display:flex;justify-content:space-between;align-items:start;flex-wrap:wrap;gap:8px;margin-bottom:8px;">
-          <div>
-            <span style="font-size:11px;color:var(--text-3);">To: ${entry.to}</span><br>
-            <span style="font-size:11px;color:var(--text-3);">${entry.subject}</span>
-          </div>
-          <a href="${entry.link}" target="_blank"
-             style="padding:5px 12px;background:var(--cyan);color:#0a0e1a;
-                    border-radius:6px;text-decoration:none;font-weight:700;font-size:12px;white-space:nowrap;">
-            Open →
-          </a>
-        </div>
-        <a href="${entry.link}" target="_blank"
-           style="font-size:12px;color:var(--cyan);word-break:break-all;line-height:1.5;">
-          ${entry.link}
-        </a>
-      </div>
-    `).join('');
-
-    modal.innerHTML = `
-      <div class="dev-modal" style="max-width:640px;">
-        <div class="dev-modal-header">
-          <h2>🛠️ Dev Email Links (${links.length})</h2>
-          <button id="dev-close-btn" class="btn btn-ghost btn-sm" style="width:auto;">✕ Close</button>
-        </div>
-        <div style="max-height:60vh;overflow-y:auto;">
-          ${links.length === 0
-            ? '<p style="color:var(--text-3);text-align:center;padding:20px;">No emails suppressed yet.</p>'
-            : rows}
-        </div>
-      </div>
-    `;
-    modal.querySelector('#dev-close-btn').addEventListener('click', () => modal.remove());
-    modal.addEventListener('click', (e) => { if (e.target === modal) modal.remove(); });
-    document.body.appendChild(modal);
-  } catch {
-    alert('Could not fetch dev links.');
-  }
-}
-
 // ── Page Init ───────────────────────────────────────────────────
 
 document.addEventListener('DOMContentLoaded', () => {
-  // Redirect to chat if already logged in
   if (SecureStorage.getAuthToken() && SecureStorage.getUser()) {
     const path = window.location.pathname;
     if (path === '/login' || path === '/register') {
@@ -475,15 +250,12 @@ document.addEventListener('DOMContentLoaded', () => {
     }
   }
 
-  // ── Register page ──────────────────────────────────────────
   const regForm = document.getElementById('register-form');
   if (regForm) regForm.addEventListener('submit', handleRegister);
 
-  // Password strength meter
   const pwInput = document.getElementById('reg-password');
   if (pwInput) pwInput.addEventListener('input', () => updateStrengthBar(pwInput.value));
 
-  // ── Login page ─────────────────────────────────────────────
   const loginForm = document.getElementById('login-form');
   if (loginForm) loginForm.addEventListener('submit', handleLogin);
 });

@@ -22,12 +22,11 @@ from app.database import Base
 class User(Base):
     __tablename__ = 'users'
 
-    id                = Column(Integer, primary_key=True)
-    username          = Column(String(80),  unique=True, nullable=False, index=True)
-    email             = Column(String(120), unique=True, nullable=False, index=True)
-    password_hash     = Column(String(256), nullable=False)   # argon2id
-    is_email_verified = Column(Boolean, default=False)
-    created_at        = Column(DateTime, default=datetime.utcnow)
+    id            = Column(Integer, primary_key=True)
+    username      = Column(String(80),  unique=True, nullable=False, index=True)
+    email         = Column(String(120), unique=True, nullable=False, index=True)
+    password_hash = Column(String(256), nullable=False)   # argon2id
+    created_at    = Column(DateTime, default=datetime.utcnow)
     # JSON blob: {store_history: bool, session_mode: bool}
     settings          = Column(Text, default='{"store_history":true,"session_mode":false}')
 
@@ -51,7 +50,6 @@ class User(Base):
             'id':       self.id,
             'username': self.username,
             'email':    self.email,
-            'verified': self.is_email_verified,
             'settings': self.get_settings(),
         }
 
@@ -79,30 +77,6 @@ class DeviceKey(Base):
             'last_seen':        self.last_seen.isoformat(),
             'is_active':        self.is_active,
         }
-
-
-# ─────────────────────────────────────────────
-#  Email Verification & 2FA
-# ─────────────────────────────────────────────
-
-class EmailVerification(Base):
-    __tablename__ = 'email_verifications'
-
-    id                = Column(Integer, primary_key=True)
-    user_id           = Column(Integer, ForeignKey('users.id'), nullable=False)
-    token             = Column(String(128), unique=True, nullable=False, index=True)
-    # 'email_verify' | '2fa_login'
-    verification_type = Column(String(20), nullable=False)
-    # For 2FA: which device is pending authorization
-    device_id         = Column(String(64), nullable=True)
-    expires_at        = Column(DateTime, nullable=False)
-    is_used           = Column(Boolean, default=False)
-    created_at        = Column(DateTime, default=datetime.utcnow)
-
-    user = relationship('User', backref='verifications')
-
-    def is_expired(self):
-        return datetime.utcnow() > self.expires_at
 
 
 # ─────────────────────────────────────────────

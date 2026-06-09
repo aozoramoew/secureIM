@@ -1,43 +1,30 @@
 """
-Authentication API router — FastAPI conversion.
+Authentication API router — FastAPI.
 
 Endpoints:
   POST   /api/auth/register
   POST   /api/auth/login
   POST   /api/auth/logout
-  POST   /api/auth/resend-verification
-  GET    /api/auth/verify-email          (email link click → redirect)
-  GET    /api/auth/2fa-verify            (device auth link → redirect)
-  GET    /api/auth/2fa-status            (polling)
   GET    /api/auth/me
   PUT    /api/auth/settings
   GET    /api/auth/devices
   DELETE /api/auth/devices/{device_id}
-  GET    /api/auth/dev-links             (dev mode only)
-
-TESTING MODE — email verification & 2FA bypassed:
-  - Registration auto-verifies and returns {status:'ok'} with a JWT.
-  - Login auto-activates new devices (no 2FA email required).
-  - All email endpoints still exist but are effectively unused.
 """
 import json
 from datetime import datetime
 from typing import Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Request
-from fastapi.responses import RedirectResponse
 from pydantic import BaseModel
 from sqlalchemy.orm import Session
 
 from app.database import get_db
-from app.models import User, DeviceKey, EmailVerification, AuditLog
+from app.models import User, DeviceKey, AuditLog
 from app.limiter import limiter
 from app.crypto_utils import (
     hash_password, verify_password, needs_rehash,
-    generate_jwt, decode_jwt, generate_secure_token,
+    generate_jwt, decode_jwt,
 )
-from app.email_utils import send_verification_email, send_2fa_email, _dev_link_buffer
-from config import settings
 
 router = APIRouter()
 
@@ -113,10 +100,6 @@ class LoginBody(BaseModel):
     ecdh_public_key:  Optional[str] = None
 
 
-class ResendVerificationBody(BaseModel):
-    email: str
-
-
 class SettingsBody(BaseModel):
     store_history: Optional[bool] = None
     session_mode:  Optional[bool] = None
@@ -135,7 +118,6 @@ def register(request: Request, body: RegisterBody, db: Session = Depends(get_db)
     device_id        = body.device_id
     device_name      = body.device_name or 'Browser'
 
-    # Validation
     if len(username) < 3 or len(username) > 30:
         raise HTTPException(status_code=400, detail='Username must be 3–30 characters')
     if len(password) < 8:
@@ -145,17 +127,14 @@ def register(request: Request, body: RegisterBody, db: Session = Depends(get_db)
     if db.query(User).filter_by(email=email).first():
         raise HTTPException(status_code=409, detail='Email already registered')
 
-    # Create user — auto-verified, no email confirmation needed
     user = User(
         username=username,
         email=email,
         password_hash=hash_password(password),
-        is_email_verified=True,
     )
     db.add(user)
-    db.flush()  # get user.id
+    db.flush()
 
-    # Register first device — auto-activated, no email needed
     device = DeviceKey(
         user_id=user.id,
         device_id=device_id,
@@ -167,11 +146,9 @@ def register(request: Request, body: RegisterBody, db: Session = Depends(get_db)
     db.add(device)
     db.commit()
 
-    # Issue JWT immediately so frontend can redirect to /chat
     token = generate_jwt(user.id, device_id)
-
     _audit(db, 'register', request, user_id=user.id,
-           detail={'username': username, 'email': email})
+           detail={'username': username})
 
     return {
         'status':  'ok',
@@ -179,77 +156,6 @@ def register(request: Request, body: RegisterBody, db: Session = Depends(get_db)
         'user':    user.to_dict(),
         'message': 'Account created — welcome to SecureIM!',
     }
-
-
-# ── Resend Verification ────────────────────────────────────────────
-
-@router.post('/resend-verification')
-@limiter.limit('3/hour')
-def resend_verification(
-    request: Request,
-    body: ResendVerificationBody,
-    db: Session = Depends(get_db),
-):
-    email = body.email.strip().lower()
-    if not email:
-        raise HTTPException(status_code=400, detail='Email is required')
-
-    user = db.query(User).filter_by(email=email).first()
-    # Always return success to avoid email enumeration
-    if not user:
-        return {'message': 'If that email is registered, a new verification link has been sent.'}
-
-    if user.is_email_verified:
-        raise HTTPException(status_code=400, detail='This account is already verified. Please sign in.')
-
-    # Invalidate existing unused tokens
-    old_evs = db.query(EmailVerification).filter_by(
-        user_id=user.id, verification_type='email_verify', is_used=False
-    ).all()
-    for old in old_evs:
-        old.is_used = True
-
-    # Fresh token
-    exp = datetime.utcnow() + settings.EMAIL_VERIFY_TOKEN_EXPIRY
-    ev = EmailVerification(
-        user_id=user.id,
-        token=generate_secure_token(),
-        verification_type='email_verify',
-        expires_at=exp,
-    )
-    db.add(ev)
-    db.commit()
-
-    send_verification_email(user, ev.token)
-    _audit(db, 'resend_verification', request, user_id=user.id)
-    return {'message': 'A new verification email has been sent. Please check your inbox.'}
-
-
-# ── Email Verification (link click) ───────────────────────────────
-
-@router.get('/verify-email')
-def verify_email(token: str = '', db: Session = Depends(get_db)):
-    ev = db.query(EmailVerification).filter_by(
-        token=token, verification_type='email_verify', is_used=False
-    ).first()
-
-    if not ev or ev.is_expired():
-        return RedirectResponse(url='/?error=invalid_or_expired_link')
-
-    ev.is_used = True
-    ev.user.is_email_verified = True
-
-    # Also activate the device that was registered alongside
-    if ev.device_id:
-        device = db.query(DeviceKey).filter_by(
-            user_id=ev.user_id, device_id=ev.device_id
-        ).first()
-        if device:
-            device.is_active = True
-            device.last_seen = datetime.utcnow()
-
-    db.commit()
-    return RedirectResponse(url='/login?verified=1')
 
 
 # ── Login ──────────────────────────────────────────────────────────
@@ -269,11 +175,6 @@ def login(request: Request, body: LoginBody, db: Session = Depends(get_db)):
         _audit(db, 'login_fail', request, detail={'username': username})
         raise HTTPException(status_code=401, detail='Invalid username or password')
 
-    # Auto-verify any unverified users (testing mode)
-    if not user.is_email_verified:
-        user.is_email_verified = True
-
-    # Rehash if params changed
     if needs_rehash(user.password_hash):
         user.password_hash = hash_password(password)
         db.commit()
@@ -283,7 +184,6 @@ def login(request: Request, body: LoginBody, db: Session = Depends(get_db)):
     ).first()
 
     if existing_device:
-        # Known device — issue JWT immediately
         existing_device.last_seen = datetime.utcnow()
         if ecdsa_public_key:
             existing_device.ecdsa_public_key = ecdsa_public_key
@@ -292,11 +192,11 @@ def login(request: Request, body: LoginBody, db: Session = Depends(get_db)):
         db.commit()
 
         token = generate_jwt(user.id, device_id)
-        _audit(db, 'login_ok', request, user_id=user.id, detail={'device_id': device_id})
+        _audit(db, 'login_ok', request, user_id=user.id,
+               detail={'device_id': device_id})
         return {'status': 'ok', 'token': token, 'user': user.to_dict()}
 
     else:
-        # New device — auto-activate (no 2FA email in testing mode)
         if not ecdsa_public_key or not ecdh_public_key:
             raise HTTPException(
                 status_code=400,
@@ -309,7 +209,7 @@ def login(request: Request, body: LoginBody, db: Session = Depends(get_db)):
             ecdsa_public_key=ecdsa_public_key,
             ecdh_public_key=ecdh_public_key,
             device_name=device_name,
-            is_active=True,  # Auto-activated for testing
+            is_active=True,
         )
         db.add(new_device)
         db.commit()
@@ -318,46 +218,6 @@ def login(request: Request, body: LoginBody, db: Session = Depends(get_db)):
         _audit(db, 'login_ok', request, user_id=user.id,
                detail={'device_id': device_id, 'new_device': True})
         return {'status': 'ok', 'token': token, 'user': user.to_dict()}
-
-
-# ── 2FA Device Authorization (link click) ─────────────────────────
-
-@router.get('/2fa-verify')
-def two_factor_verify(token: str = '', db: Session = Depends(get_db)):
-    ev = db.query(EmailVerification).filter_by(
-        token=token, verification_type='2fa_login', is_used=False
-    ).first()
-
-    if not ev or ev.is_expired():
-        return RedirectResponse(url='/?error=invalid_or_expired_2fa')
-
-    device = db.query(DeviceKey).filter_by(
-        user_id=ev.user_id, device_id=ev.device_id
-    ).first()
-    if not device:
-        return RedirectResponse(url='/?error=device_not_found')
-
-    device.is_active = True
-    device.last_seen = datetime.utcnow()
-    ev.is_used = True
-    db.commit()
-    return RedirectResponse(url=f'/device-authorized?device={device.device_name}')
-
-
-# ── 2FA Status Polling ─────────────────────────────────────────────
-
-@router.get('/2fa-status')
-def two_factor_status(device_id: str = '', db: Session = Depends(get_db)):
-    if not device_id:
-        raise HTTPException(status_code=400, detail='device_id required')
-
-    device = db.query(DeviceKey).filter_by(device_id=device_id, is_active=True).first()
-    if not device:
-        return {'status': 'pending'}
-
-    token = generate_jwt(device.user_id, device_id)
-    user  = db.get(User, device.user_id)
-    return {'status': 'authorized', 'token': token, 'user': user.to_dict()}
 
 
 # ── Me / Settings / Devices ───────────────────────────────────────
@@ -383,7 +243,8 @@ def update_settings(body: SettingsBody, auth=Depends(get_current_user_and_device
 
 
 @router.get('/devices')
-def list_devices(auth=Depends(get_current_user_and_device), db: Session = Depends(get_db)):
+def list_devices(auth=Depends(get_current_user_and_device),
+                 db: Session = Depends(get_db)):
     user, _ = auth
     devices = db.query(DeviceKey).filter_by(user_id=user.id, is_active=True).all()
     return {'devices': [d.to_dict() for d in devices]}
@@ -393,7 +254,9 @@ def list_devices(auth=Depends(get_current_user_and_device), db: Session = Depend
 def revoke_device(dev_id: str, auth=Depends(get_current_user_and_device),
                   db: Session = Depends(get_db)):
     user, _ = auth
-    device = db.query(DeviceKey).filter_by(user_id=user.id, device_id=dev_id).first()
+    device = db.query(DeviceKey).filter_by(
+        user_id=user.id, device_id=dev_id
+    ).first()
     if not device:
         raise HTTPException(status_code=404, detail='Device not found')
     device.is_active = False
@@ -402,20 +265,9 @@ def revoke_device(dev_id: str, auth=Depends(get_current_user_and_device),
 
 
 @router.post('/logout')
-def logout(auth=Depends(get_current_user_and_device), db: Session = Depends(get_db)):
+def logout(auth=Depends(get_current_user_and_device),
+           db: Session = Depends(get_db)):
     user, device = auth
     device.is_active = False
     db.commit()
     return {'message': 'Logged out successfully'}
-
-
-# ── Dev-only: view suppressed email links ─────────────────────────
-
-@router.get('/dev-links')
-def dev_links():
-    if not settings.MAIL_SUPPRESS_SEND:
-        raise HTTPException(status_code=403, detail='Not available in production')
-    return {
-        'note': 'Suppressed emails (dev mode). Copy the link and open it in your browser.',
-        'links': list(reversed(_dev_link_buffer)),  # newest first
-    }

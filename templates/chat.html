@@ -79,20 +79,7 @@
 
     <!-- Settings footer -->
     <div class="sidebar-footer">
-      <div class="settings-toggle">
-        <span>💾 Save message history</span>
-        <label class="toggle-switch">
-          <input type="checkbox" id="toggle-store-history" checked>
-          <span class="toggle-thumb"></span>
-        </label>
-      </div>
-      <div class="settings-toggle">
-        <span>🔄 Ephemeral session mode</span>
-        <label class="toggle-switch">
-          <input type="checkbox" id="toggle-session-mode">
-          <span class="toggle-thumb"></span>
-        </label>
-      </div>
+      <div class="sidebar-footer-info">🔒 E2EE · Keys never leave your device</div>
     </div>
   </aside>
 
@@ -119,6 +106,7 @@
           <div class="chat-header-status" id="chat-header-status"></div>
         </div>
         <div id="enc-status-badge" class="enc-badge pending">⏳ Establishing…</div>
+        <button id="delete-group-btn" class="icon-btn header-danger-btn" title="Delete group" style="display:none;">🗑️</button>
       </div>
 
       <!-- Messages -->

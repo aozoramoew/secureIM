@@ -701,6 +701,7 @@ async function openDM(userId, username) {
   if (avatarEl) { avatarEl.textContent = username[0].toUpperCase(); avatarEl.classList.remove('group-avatar'); }
   document.getElementById('no-chat-placeholder').style.display = 'none';
   document.getElementById('chat-main').style.display = 'flex';
+  document.getElementById('delete-group-btn').style.display = 'none';
 
   updateEncryptionBadge(false);
   setActiveSidebarItem(userId, 'user');
@@ -732,6 +733,7 @@ async function openGroup(groupId, groupName) {
   if (avatarEl) { avatarEl.textContent = '#'; avatarEl.classList.add('group-avatar'); }
   document.getElementById('no-chat-placeholder').style.display = 'none';
   document.getElementById('chat-main').style.display = 'flex';
+  document.getElementById('delete-group-btn').style.display = 'inline-flex';
 
   setActiveSidebarItem(groupId, 'group');
   clearUnreadBadge(groupId);
@@ -1008,28 +1010,9 @@ async function loadGroups() {
       li.className = 'contact-item';
       li.setAttribute('data-group-id', g.id);
 
-      const avatar = document.createElement('div');
-      avatar.className = 'contact-avatar group-avatar';
-      avatar.textContent = '#';
-
-      const info = document.createElement('div');
-      info.className = 'contact-info';
-      const nameSpan = document.createElement('span');
-      nameSpan.className = 'contact-name';
-      nameSpan.textContent = g.name;
-      info.appendChild(nameSpan);
-
-      const badge = document.createElement('span');
-      badge.className = 'unread-badge';
-
-      // Delete button — only visible on hover, only for admin (server enforces)
-      const delBtn = document.createElement('button');
-      delBtn.className = 'group-delete-btn';
-      delBtn.title = 'Delete group';
-      delBtn.textContent = '🗑';
-      delBtn.addEventListener('click', e => { e.stopPropagation(); deleteGroup(g.id); });
-
-      li.append(avatar, info, badge, delBtn);
+      li.innerHTML = `<div class="contact-avatar group-avatar">#</div>
+        <div class="contact-info"><span class="contact-name">${escapeHtml(g.name)}</span></div>
+        <span class="unread-badge"></span>`;
       li.addEventListener('click', () => openGroup(g.id, g.name));
       list.appendChild(li);
     });
@@ -1140,21 +1123,11 @@ async function verifyContact(contactId, username) {
   }
 }
 
-// ── Settings Panel ────────────────────────────────────────────────
-
+// ── Settings ──────────────────────────────────────────────────────
+// store_history is always ON — messages are encrypted locally with PBKDF2 key.
+// Ephemeral session keys are always used for forward secrecy; they live in RAM only.
 function applySettings() {
-  const s = SecureStorage.getSettings();
-  const storeToggle   = document.getElementById('toggle-store-history');
-  const sessionToggle = document.getElementById('toggle-session-mode');
-  if (storeToggle)   storeToggle.checked = s.store_history !== false;
-  if (sessionToggle) sessionToggle.checked = s.session_mode === true;
-}
-
-async function updateSetting(key, value) {
-  const settings = SecureStorage.getSettings();
-  settings[key] = value;
-  SecureStorage.saveSettings(settings);
-  await apiPut('/api/auth/settings', { [key]: value });
+  SecureStorage.saveSettings({ store_history: true, session_mode: false });
 }
 
 // ── Encryption Status Badge ────────────────────────────────────────
@@ -1407,14 +1380,11 @@ document.addEventListener('DOMContentLoaded', () => {
     previewClose?.addEventListener('click', clearAttachment);
   }
 
-  const storeToggle = document.getElementById('toggle-store-history');
-  if (storeToggle) storeToggle.addEventListener('change', e => updateSetting('store_history', e.target.checked));
-
-  const sessionToggle = document.getElementById('toggle-session-mode');
-  if (sessionToggle) sessionToggle.addEventListener('change', e => updateSetting('session_mode', e.target.checked));
-
   document.getElementById('create-group-btn')?.addEventListener('click', createGroup);
   document.getElementById('group-modal-close')?.addEventListener('click', () => closeModal('group-modal'));
+  document.getElementById('delete-group-btn')?.addEventListener('click', () => {
+    if (activeConversation?.type === 'group') deleteGroup(activeConversation.id);
+  });
 
   document.getElementById('open-group-modal-btn')?.addEventListener('click', () => {
     const overlay = document.getElementById('group-modal');

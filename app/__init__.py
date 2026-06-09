@@ -20,22 +20,30 @@ _templates_dir = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__
 
 def _migrate_schema(engine):
     """Add any columns that may be missing from tables created before schema updates."""
+    import logging
     import sqlalchemy as _sa
-    insp = _sa.inspect(engine)
-    with engine.connect() as conn:
-        # groups.key_version — added after initial deploy
-        if 'groups' in insp.get_table_names():
-            cols = {c['name'] for c in insp.get_columns('groups')}
-            if 'key_version' not in cols:
-                conn.execute(_sa.text('ALTER TABLE groups ADD COLUMN key_version INTEGER DEFAULT 1'))
-                conn.commit()
-        # messages.session_id is NOT in the model (passed in socket events only) — skip
-        # messages.cleanup_at — added for self-destruct
-        if 'messages' in insp.get_table_names():
-            cols = {c['name'] for c in insp.get_columns('messages')}
-            if 'cleanup_at' not in cols:
-                conn.execute(_sa.text('ALTER TABLE messages ADD COLUMN cleanup_at DATETIME'))
-                conn.commit()
+    log = logging.getLogger(__name__)
+    is_pg = 'postgresql' in str(engine.url)
+    ts_type = 'TIMESTAMP' if is_pg else 'DATETIME'
+    try:
+        insp = _sa.inspect(engine)
+        with engine.connect() as conn:
+            # groups.key_version — added after initial deploy
+            if 'groups' in insp.get_table_names():
+                cols = {c['name'] for c in insp.get_columns('groups')}
+                if 'key_version' not in cols:
+                    conn.execute(_sa.text('ALTER TABLE groups ADD COLUMN key_version INTEGER DEFAULT 1'))
+                    conn.commit()
+                    log.info('[migrate] Added groups.key_version')
+            # messages.cleanup_at — added for self-destruct cleanup tracking
+            if 'messages' in insp.get_table_names():
+                cols = {c['name'] for c in insp.get_columns('messages')}
+                if 'cleanup_at' not in cols:
+                    conn.execute(_sa.text(f'ALTER TABLE messages ADD COLUMN cleanup_at {ts_type}'))
+                    conn.commit()
+                    log.info('[migrate] Added messages.cleanup_at')
+    except Exception as e:
+        log.error('[migrate] Schema migration error (non-fatal): %s', e)
 
 
 def create_app():

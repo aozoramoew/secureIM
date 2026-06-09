@@ -114,17 +114,18 @@ async function handleRegister(e) {
       }),
     });
 
-    let data = {};
     const ct = res.headers.get('content-type') || '';
+    let data = {};
+    let rawText = '';
     if (ct.includes('application/json')) {
       data = await res.json();
     } else {
-      await res.text();
-      throw new Error(`Server error (HTTP ${res.status}). Check server logs.`);
+      rawText = await res.text();
     }
 
     if (!res.ok) {
-      throw new Error(data.detail || data.error || 'Registration failed');
+      const detail = data.detail || data.error || rawText || `HTTP ${res.status}`;
+      throw new Error(detail.length > 200 ? detail.slice(0, 200) + '…' : detail);
     }
 
     SecureStorage.saveAuthToken(data.token);
@@ -214,13 +215,13 @@ async function handleLogin(e) {
       }),
     });
 
-    let data = {};
     const ct = res.headers.get('content-type') || '';
+    let data = {};
+    let rawText = '';
     if (ct.includes('application/json')) {
       data = await res.json();
     } else {
-      await res.text();
-      throw new Error(`Server error (HTTP ${res.status}). Check server logs.`);
+      rawText = await res.text();
     }
 
     if (res.status === 200 && data.status === 'ok') {
@@ -229,7 +230,8 @@ async function handleLogin(e) {
       SecureStorage.saveSettings(data.user.settings || {});
       window.location.href = '/chat';
     } else {
-      throw new Error(data.detail || data.error || 'Login failed');
+      const detail = data.detail || data.error || rawText || `HTTP ${res.status}`;
+      throw new Error(detail.length > 200 ? detail.slice(0, 200) + '…' : detail);
     }
 
   } catch (err) {

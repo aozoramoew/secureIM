@@ -1,15 +1,11 @@
 """
 Security middleware — injects HTTP security headers on every response.
-Converted from Flask after_request hook to a FastAPI ASGI middleware class.
 
-The Content-Security-Policy enforces that:
-  - Only our own JS files execute (script-src 'self')
-  - No inline scripts or eval() (default, no 'unsafe-inline' or 'unsafe-eval')
-  - No iframes (frame-ancestors 'none') — blocks clickjacking
-  - WebSocket connections to self allowed (connect-src 'self' ws: wss:)
+Implemented as a pure ASGI middleware (not BaseHTTPMiddleware) to avoid
+Starlette's known issue where BaseHTTPMiddleware swallows exceptions and
+returns a plain-text 500 with no Content-Type header, breaking JSON error
+responses from FastAPI.
 """
-from starlette.middleware.base import BaseHTTPMiddleware
-from starlette.requests import Request
 
 CSP = (
     "default-src 'self'; "
@@ -24,18 +20,38 @@ CSP = (
     "form-action 'self';"
 )
 
+_SECURITY_HEADERS = [
+    (b'content-security-policy',  CSP.encode()),
+    (b'x-content-type-options',   b'nosniff'),
+    (b'x-frame-options',          b'DENY'),
+    (b'x-xss-protection',         b'0'),
+    (b'referrer-policy',          b'strict-origin-when-cross-origin'),
+    (b'permissions-policy',       b'geolocation=(), camera=(), microphone=()'),
+]
 
-class SecurityHeadersMiddleware(BaseHTTPMiddleware):
-    async def dispatch(self, request: Request, call_next):
-        response = await call_next(request)
-        response.headers['Content-Security-Policy']  = CSP
-        response.headers['X-Content-Type-Options']   = 'nosniff'
-        response.headers['X-Frame-Options']          = 'DENY'
-        response.headers['X-XSS-Protection']         = '0'
-        response.headers['Referrer-Policy']          = 'strict-origin-when-cross-origin'
-        response.headers['Permissions-Policy']       = 'geolocation=(), camera=(), microphone=()'
-        if request.url.scheme == 'https':
-            response.headers['Strict-Transport-Security'] = (
-                'max-age=63072000; includeSubDomains; preload'
-            )
-        return response
+_HSTS = (b'strict-transport-security', b'max-age=63072000; includeSubDomains; preload')
+
+
+class SecurityHeadersMiddleware:
+    """Pure ASGI middleware — wraps the app without touching BaseHTTPMiddleware."""
+
+    def __init__(self, app):
+        self.app = app
+
+    async def __call__(self, scope, receive, send):
+        if scope['type'] not in ('http', 'websocket'):
+            await self.app(scope, receive, send)
+            return
+
+        is_https = scope.get('scheme') in ('https', 'wss')
+
+        async def send_with_headers(message):
+            if message['type'] == 'http.response.start':
+                headers = list(message.get('headers', []))
+                headers.extend(_SECURITY_HEADERS)
+                if is_https:
+                    headers.append(_HSTS)
+                message = {**message, 'headers': headers}
+            await send(message)
+
+        await self.app(scope, receive, send_with_headers)

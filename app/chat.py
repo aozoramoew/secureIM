@@ -90,16 +90,15 @@ async def connect(sid, environ, auth):
     await sio.enter_room(sid, f'user_{user.id}')
     await sio.emit('user_online', {'user_id': user.id, 'username': user.username})
 
-    # Replay any pending session requests that arrived while this user was offline.
-    # A session is "pending" if user_b has not yet responded (ephemeral_pub_b is null).
     db = SessionLocal()
     try:
-        pending = db.query(ChatSession).filter(
+        # 1. Replay pending session requests (handshake incomplete while offline).
+        pending_sessions = db.query(ChatSession).filter(
             ChatSession.user_b_id == user.id,
             ChatSession.is_active == True,  # noqa: E712
             ChatSession.ephemeral_pub_b == None,  # noqa: E711
         ).all()
-        for sess in pending:
+        for sess in pending_sessions:
             initiator = db.get(User, sess.user_a_id)
             if not initiator:
                 continue
@@ -107,13 +106,35 @@ async def connect(sid, environ, auth):
                 user_id=initiator.id, is_active=True
             ).order_by(DeviceKey.last_seen.desc()).first()
             await sio.emit('session_request', {
-                'session_id':      sess.id,
-                'initiator_id':    initiator.id,
-                'initiator':       initiator.username,
-                'initiator_device_id': initiator_device.device_id if initiator_device else None,
+                'session_id':         sess.id,
+                'initiator_id':       initiator.id,
+                'initiator':          initiator.username,
+                'initiator_device_id': (
+                    initiator_device.device_id if initiator_device else None
+                ),
                 'ephemeral_pub_a': sess.ephemeral_pub_a,
                 'ephemeral_sig_a': sess.ephemeral_sig_a,
             }, room=sid)
+
+        # 2. Push undelivered DM messages sent while this user was offline.
+        # These are messages addressed to this user that were stored in DB but
+        # not yet received over a socket (offline_delivery=true in payload means
+        # they were encrypted with the static ECDH key — no session needed).
+        missed = db.query(Message).filter(
+            Message.recipient_id == user.id,
+            Message.is_deep_deleted == False,  # noqa: E712
+            Message.group_id == None,          # noqa: E711  DM only
+        ).order_by(Message.timestamp.asc()).limit(200).all()
+
+        for msg in missed:
+            payloads = json.loads(msg.encrypted_payloads or '{}')
+            if device_id not in payloads:
+                continue  # no copy encrypted for this device
+            sender = db.get(User, msg.sender_id)
+            msg_dict = msg.to_dict(requesting_user_id=user.id)
+            msg_dict['sender_username'] = sender.username if sender else ''
+            msg_dict['session_id'] = None  # client uses offline_delivery flag
+            await sio.emit('receive_message', msg_dict, room=sid)
     finally:
         db.close()
 
@@ -185,11 +206,19 @@ async def send_message(sid, data):
 
         else:  # DM
             session_id = data.get('session_id')
-            sess = db.get(ChatSession, session_id)
-            if not sess or not sess.is_active:
-                return
+            recipient_id = data.get('recipient_id')
+            sess = db.get(ChatSession, session_id) if session_id else None
 
-            recipient_id = sess.user_b_id if sess.user_a_id == sender.id else sess.user_a_id
+            # Offline delivery: client sends recipient_id directly when no live
+            # session exists (payload was encrypted with recipient's static ECDH key).
+            if not sess and recipient_id:
+                recipient_id = int(recipient_id)
+            elif sess and sess.is_active:
+                recipient_id = (
+                    sess.user_b_id if sess.user_a_id == sender.id else sess.user_a_id
+                )
+            else:
+                return  # no session and no recipient_id — reject
 
             expires_seconds = data.get('expires_seconds')
             expires_at = None
@@ -205,8 +234,11 @@ async def send_message(sid, data):
             )
             db.add(msg)
 
-            sess.message_count += 1
-            needs_rotation = sess.message_count >= settings.KEY_ROTATION_THRESHOLD
+            needs_rotation = False
+            if sess and sess.is_active:
+                sess.message_count += 1
+                needs_rotation = sess.message_count >= settings.KEY_ROTATION_THRESHOLD
+
             db.commit()
 
             msg_dict = msg.to_dict(requesting_user_id=sender.id)

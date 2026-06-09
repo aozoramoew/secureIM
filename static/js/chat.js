@@ -346,49 +346,89 @@ async function sendMessage() {
   input.focus();
 
   const sessionKeys = SecureStorage.getSessionKeys(activeConversation.sessionId);
-  if (!sessionKeys?.aesKey) {
-    showAlert('⚠️ No secure session yet. Please wait for key exchange.', 'warning');
-    return;
+  // Allow sending even without an established ephemeral session (recipient offline).
+  // In that case we fall back to encrypting per-device using the recipient's static
+  // ECDH public key (registered on the server at login/register time). This is
+  // analogous to a Signal "prekey message" — the recipient decrypts with their
+  // static ECDH private key when they come back online.
+  const hasEphemeralSession = !!(sessionKeys?.aesKey);
+
+  if (!hasEphemeralSession && activeConversation.type === 'dm') {
+    showAlert('📨 Recipient is offline — message will be delivered when they reconnect.', 'info');
   }
 
   try {
-    // Get recipient device keys for multi-device E2EE
     let deviceMap = {};
     const fileAttach = currentAttachment;
     clearAttachment();
 
-    async function encryptPayload(devId) {
+    // Derive a per-device AES+HMAC key pair from our ephemeral private key and the
+    // device's static ECDH public key. Used when no live ephemeral session exists.
+    async function deriveStaticKeys(deviceEcdhPubJwk) {
+      const ephemeral = await SecureCrypto.generateEphemeralKeyPair();
+      const ephPubJwk = await SecureCrypto.exportKeyJWK(ephemeral.publicKey);
+      const aesKey  = await SecureCrypto.deriveSessionKey(ephemeral.privateKey, deviceEcdhPubJwk);
+      const hmacKey = await SecureCrypto.deriveHMACKey(ephemeral.privateKey, deviceEcdhPubJwk);
+      return { aesKey, hmacKey, senderEphPub: ephPubJwk };
+    }
+
+    async function encryptForDevice(aesKey, hmacKey) {
       if (fileAttach) {
         const payload = await SecureCrypto.encryptBinaryMessage(
-          sessionKeys.aesKey, sessionKeys.hmacKey, fileAttach.buffer, 
+          aesKey, hmacKey, fileAttach.buffer,
           { filename: fileAttach.file.name, mime: fileAttach.file.type }
         );
         payload.content_type = 'media';
         if (text) payload.caption = text;
         return payload;
-      } else {
-        return await SecureCrypto.encryptMessage(sessionKeys.aesKey, sessionKeys.hmacKey, text);
       }
+      return SecureCrypto.encryptMessage(aesKey, hmacKey, text);
     }
 
     if (activeConversation.type === 'dm') {
       const keysRes = await apiGet(`${CHAT_API}/users/${activeConversation.username}/keys`);
       const { devices } = await keysRes.json();
+
       for (const dev of devices) {
-        deviceMap[dev.device_id] = await encryptPayload(dev.device_id);
+        if (hasEphemeralSession) {
+          // Fast path: use the shared ephemeral session key (best forward secrecy)
+          const payload = await encryptForDevice(sessionKeys.aesKey, sessionKeys.hmacKey);
+          deviceMap[dev.device_id] = payload;
+        } else {
+          // Offline path: derive one-shot key from recipient's static ECDH public key.
+          // senderEphPub is included so the recipient can derive the same key on their side.
+          const { aesKey, hmacKey, senderEphPub } = await deriveStaticKeys(dev.ecdh_public_key);
+          const payload = await encryptForDevice(aesKey, hmacKey);
+          payload.sender_eph_pub = senderEphPub;  // recipient needs this to derive the key
+          payload.offline_delivery = true;
+          deviceMap[dev.device_id] = payload;
+        }
       }
-      
-      // Also encrypt for our own devices so we can read our own message history
+
+      // Encrypt for our own devices so we can read our own sent messages
       const myKeysRes = await apiGet(`${CHAT_API}/users/${currentUser.username}/keys`);
-      const myKeysBody = await myKeysRes.json();
-      for (const dev of myKeysBody.devices) {
-        if (!deviceMap[dev.device_id]) {
-          deviceMap[dev.device_id] = await encryptPayload(dev.device_id);
+      const { devices: myDevices } = await myKeysRes.json();
+      for (const dev of myDevices) {
+        if (deviceMap[dev.device_id]) continue;
+        if (hasEphemeralSession) {
+          deviceMap[dev.device_id] = await encryptForDevice(sessionKeys.aesKey, sessionKeys.hmacKey);
+        } else {
+          const { aesKey, hmacKey, senderEphPub } = await deriveStaticKeys(dev.ecdh_public_key);
+          const payload = await encryptForDevice(aesKey, hmacKey);
+          payload.sender_eph_pub = senderEphPub;
+          payload.offline_delivery = true;
+          deviceMap[dev.device_id] = payload;
         }
       }
     } else {
       // Group: encrypt with group AES key for each member device
-      deviceMap['group'] = await encryptPayload('group');
+      const aesKey  = hasEphemeralSession ? sessionKeys.aesKey  : null;
+      const hmacKey = hasEphemeralSession ? sessionKeys.hmacKey : null;
+      if (!aesKey) {
+        showAlert('⚠️ No group session key yet.', 'warning');
+        return;
+      }
+      deviceMap['group'] = await encryptForDevice(aesKey, hmacKey);
     }
 
     // Self-destruct: read expires_seconds from the selector in the input bar
@@ -397,6 +437,9 @@ async function sendMessage() {
 
     socket.emit('send_message', {
       session_id:          activeConversation.sessionId,
+      // Include recipient_id for offline delivery so server can route without a session
+      recipient_id:        (!hasEphemeralSession && activeConversation.type === 'dm')
+                             ? activeConversation.id : undefined,
       group_id:            activeConversation.type === 'group' ? activeConversation.id : undefined,
       encrypted_payloads:  deviceMap,
       msg_type:            activeConversation.type,
@@ -445,27 +488,49 @@ async function onReceiveMessage(msg) {
 
   const sessionId = msg.session_id || activeConversation?.sessionId;
 
-  if (myPayload && sessionId) {
-    const keys = SecureStorage.getSessionKeys(sessionId);
-    if (keys?.aesKey) {
-      try {
+  if (myPayload) {
+    try {
+      let aesKey, hmacKey;
+
+      if (myPayload.offline_delivery && myPayload.sender_eph_pub) {
+        // Message was sent while we were offline — sender used our static ECDH public key.
+        // Derive the same session key using our static ECDH private key + sender's ephemeral pub.
+        aesKey  = await SecureCrypto.deriveSessionKey(myEcdhPrivKey, myPayload.sender_eph_pub);
+        hmacKey = await SecureCrypto.deriveHMACKey(myEcdhPrivKey, myPayload.sender_eph_pub);
+      } else {
+        // Normal path: use the established ephemeral session key from memory.
+        const keys = SecureStorage.getSessionKeys(sessionId);
+        if (!keys?.aesKey) {
+          // Session key not in memory (e.g. page refresh) — cannot decrypt yet.
+          // The message is saved to storage as-is; it will be re-decrypted once
+          // the session is re-established.
+          plaintext = null;
+        } else {
+          aesKey  = keys.aesKey;
+          hmacKey = keys.hmacKey;
+        }
+      }
+
+      if (aesKey) {
         if (myPayload.content_type === 'media') {
-          const { metadata, fileBuffer } = await SecureCrypto.decryptBinaryMessage(keys.aesKey, keys.hmacKey, myPayload);
+          const { metadata, fileBuffer } = await SecureCrypto.decryptBinaryMessage(
+            aesKey, hmacKey, myPayload
+          );
           const blob = new Blob([fileBuffer], { type: metadata.mime });
           mediaObj = {
             content_type: 'media',
-            mediaUrl: URL.createObjectURL(blob),
+            mediaUrl:  URL.createObjectURL(blob),
             mediaType: metadata.mime.startsWith('image') ? 'image' : 'video',
             mediaMime: metadata.mime,
             mediaData: SecureCrypto.bufToB64(fileBuffer),
-            plaintext: myPayload.caption || null
+            plaintext: myPayload.caption || null,
           };
         } else {
-          plaintext = await SecureCrypto.decryptMessage(keys.aesKey, keys.hmacKey, myPayload);
+          plaintext = await SecureCrypto.decryptMessage(aesKey, hmacKey, myPayload);
         }
-      } catch (e) {
-        plaintext = '⚠️ [HMAC verification failed — message may be tampered]';
       }
+    } catch (e) {
+      plaintext = '⚠️ [HMAC verification failed — message may be tampered]';
     }
   }
 

@@ -1099,6 +1099,9 @@ async function createGroup() {
 }
 
 function onGroupCreated(data) {
+  // Avoid duplicate: only reload if this group is not already in the sidebar.
+  const gid = data?.group?.id;
+  if (gid && document.querySelector(`[data-group-id="${gid}"]`)) return;
   loadGroups();
 }
 
@@ -1115,14 +1118,16 @@ async function deleteGroup(groupId) {
 }
 
 function onGroupDeleted(data) {
-  const { group_id } = data;
+  const group_id = Number(data.group_id);
   // Clear UI if we're currently in this group
   if (activeConversation?.type === 'group' && activeConversation.id === group_id) {
     activeConversation = null;
     document.getElementById('chat-main').style.display = 'none';
     document.getElementById('no-chat-placeholder').style.display = 'flex';
+    document.getElementById('delete-group-btn').style.display = 'none';
+    showAlert('🗑️ This group has been deleted.', 'info');
   }
-  // Remove from sidebar
+  // Remove from sidebar immediately
   document.querySelector(`[data-group-id="${group_id}"]`)?.remove();
   // Clear cached group key
   SecureStorage.clearSessionKeys(`grp_${group_id}`);

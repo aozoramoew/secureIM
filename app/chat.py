@@ -318,13 +318,32 @@ async def typing(sid, data):
     info = _connected_sids.get(sid)
     if not info:
         return
-    target = data.get('recipient_id') or data.get('group_id')
-    if not target:
-        return
-    await _emit_to_user(target, 'typing', {
-        'user_id':  info['user_id'],
-        'is_typing': data.get('is_typing', True),
-    })
+    recipient_id = data.get('recipient_id')
+    group_id = data.get('group_id')
+    if recipient_id:
+        # DM typing — send to recipient with sender context
+        await _emit_to_user(int(recipient_id), 'typing', {
+            'user_id':           info['user_id'],
+            'is_typing':         data.get('is_typing', True),
+            'conversation_type': 'dm',
+            'peer_id':           info['user_id'],
+        })
+    elif group_id:
+        # Group typing — broadcast to all group members
+        db = SessionLocal()
+        try:
+            members = db.query(GroupMember).filter_by(group_id=int(group_id)).all()
+            for m in members:
+                if m.user_id == info['user_id']:
+                    continue
+                await _emit_to_user(m.user_id, 'typing', {
+                    'user_id':           info['user_id'],
+                    'is_typing':         data.get('is_typing', True),
+                    'conversation_type': 'group',
+                    'group_id':          int(group_id),
+                })
+        finally:
+            db.close()
 
 
 @sio.event

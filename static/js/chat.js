@@ -150,9 +150,11 @@ function connectSocket(token) {
   socket.on('group_key_requested', onGroupKeyRequested);
 
   socket.on('typing', d => {
-    if (activeConversation && d.user_id !== currentUser.id) {
-      showTypingIndicator(d.is_typing);
-    }
+    if (!activeConversation || d.user_id === currentUser.id) return;
+    const match =
+      (activeConversation.type === 'dm'    && d.conversation_type === 'dm'    && activeConversation.id === d.peer_id) ||
+      (activeConversation.type === 'group' && d.conversation_type === 'group' && activeConversation.id === Number(d.group_id));
+    if (match) showTypingIndicator(d.is_typing);
   });
 }
 
@@ -457,8 +459,10 @@ async function _sendMessageInner() {
 
     async function encryptForDevice(aesKey, hmacKey) {
       if (fileAttach) {
+        // Slice the buffer to prevent detachment issues across async boundaries
+        const buf = fileAttach.buffer.slice(0);
         const payload = await SecureCrypto.encryptBinaryMessage(
-          aesKey, hmacKey, fileAttach.buffer,
+          aesKey, hmacKey, buf,
           { filename: fileAttach.file.name, mime: fileAttach.file.type }
         );
         payload.content_type = 'media';
@@ -571,7 +575,9 @@ async function _sendMessageInner() {
     _pendingOutgoing.push({ tempId, convId: getActiveConvId() });
 
   } catch (err) {
+    console.error('[sendMessage] error:', err);
     showAlert('❌ Failed to send: ' + err.message, 'error');
+    _sending = false;
   }
 }
 
@@ -657,7 +663,7 @@ async function onReceiveMessage(msg) {
 
   // Update sidebar unread badge
   if (!isForActiveConversation && msg.sender_id !== currentUser.id) {
-    updateUnreadBadge(msg.sender_id || msg.group_id);
+    updateUnreadBadge(msg.group_id || msg.sender_id);
   }
 }
 
@@ -1400,10 +1406,16 @@ function apiPut(url, body) {
 let _typingTimeout = null;
 function onInputTyping() {
   if (!activeConversation) return;
-  socket?.emit('typing', { recipient_id: activeConversation.id, is_typing: true });
+  const payload = activeConversation.type === 'group'
+    ? { group_id: activeConversation.id, is_typing: true }
+    : { recipient_id: activeConversation.id, is_typing: true };
+  socket?.emit('typing', payload);
   clearTimeout(_typingTimeout);
   _typingTimeout = setTimeout(() => {
-    socket?.emit('typing', { recipient_id: activeConversation.id, is_typing: false });
+    const stopPayload = activeConversation?.type === 'group'
+      ? { group_id: activeConversation.id, is_typing: false }
+      : { recipient_id: activeConversation.id, is_typing: false };
+    socket?.emit('typing', stopPayload);
   }, 2000);
 }
 
@@ -1423,10 +1435,17 @@ document.addEventListener('DOMContentLoaded', () => {
   initChat();
 
   document.getElementById('message-input')?.addEventListener('keydown', e => {
-    if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); sendMessage(); }
-    else onInputTyping();
+    if (e.key === 'Enter' && !e.shiftKey && !e.isComposing) {
+      e.preventDefault();
+      sendMessage();
+    } else {
+      onInputTyping();
+    }
   });
-  document.getElementById('send-btn')?.addEventListener('click', sendMessage);
+  document.getElementById('send-btn')?.addEventListener('click', e => {
+    e.preventDefault();
+    sendMessage();
+  });
   document.getElementById('search-input')?.addEventListener('input', onSearch);
   document.getElementById('logout-btn')?.addEventListener('click', logout);
 

@@ -147,6 +147,51 @@ async def connect(sid, environ, auth):
 
 
 @sio.event
+async def request_group_key(sid, data):
+    """
+    A member with a new device requests that other online members re-wrap
+    the group key for their device_id. Server relays the request to other
+    online members who have a bundle for this group and can re-wrap it.
+    data = { group_id: int, device_id: str, ecdh_public_key: JWK str }
+    """
+    info = _connected_sids.get(sid)
+    if not info:
+        return
+    group_id = data.get('group_id')
+    requester_device_id = data.get('device_id')
+    ecdh_pub = data.get('ecdh_public_key')
+    if not group_id or not requester_device_id or not ecdh_pub:
+        return
+
+    db = SessionLocal()
+    try:
+        requester_user_id = info['user_id']
+        member = db.query(GroupMember).filter_by(
+            group_id=group_id, user_id=requester_user_id
+        ).first()
+        if not member:
+            return
+
+        # Broadcast to all OTHER online members of this group so one of them
+        # can re-wrap and upload the key for the requester's device.
+        all_members = db.query(GroupMember).filter_by(group_id=group_id).all()
+        for gm in all_members:
+            if gm.user_id == requester_user_id:
+                continue
+            if not gm.encrypted_group_keys:
+                continue
+            # Only relay to members who have at least one key bundle stored
+            await _emit_to_user(gm.user_id, 'group_key_requested', {
+                'group_id':       group_id,
+                'requester_uid':  requester_user_id,
+                'device_id':      requester_device_id,
+                'ecdh_public_key': ecdh_pub,
+            })
+    finally:
+        db.close()
+
+
+@sio.event
 async def disconnect(sid):
     info = _connected_sids.pop(sid, None)
     if info:

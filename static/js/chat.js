@@ -145,8 +145,9 @@ function connectSocket(token) {
   socket.on('receive_message', onReceiveMessage);
   socket.on('message_deleted', onMessageDeleted);
   socket.on('message_read',    onMessageRead);
-  socket.on('group_deleted',   onGroupDeleted);
-  socket.on('group_created',   onGroupCreated);
+  socket.on('group_deleted',    onGroupDeleted);
+  socket.on('group_created',    onGroupCreated);
+  socket.on('group_key_requested', onGroupKeyRequested);
 
   socket.on('typing', d => {
     if (activeConversation && d.user_id !== currentUser.id) {
@@ -251,14 +252,10 @@ async function onSessionRequest(data) {
   if (activeConversation?.type === 'dm' && activeConversation.sessionId === session_id) {
     updateEncryptionBadge(true);
     await _redecryptActiveConversation(aesKey, hmacKey);
-  } else if (activeConversation?.type === 'dm') {
-    // Session may have been updated — check if this session matches current contact
-    // by looking at initiator_id
-    if (initiator_id === activeConversation.id) {
-      activeConversation.sessionId = session_id;
-      updateEncryptionBadge(true);
-      await _redecryptActiveConversation(aesKey, hmacKey);
-    }
+  } else if (activeConversation?.type === 'dm' && initiator_id === activeConversation.id) {
+    activeConversation.sessionId = session_id;
+    updateEncryptionBadge(true);
+    await _redecryptActiveConversation(aesKey, hmacKey);
   }
 }
 
@@ -338,7 +335,11 @@ async function onSessionReady(data) {
   SecureStorage.storeSessionKeys(session_id, aesKey, hmacKey, stored.myEphemeral);
 
   if (isThisSession) {
-    showAlert('🔒 Secure session established with ' + activeConversation.name, 'success');
+    // Only show "session established" once per conversation open, not on every re-key
+    if (!activeConversation._sessionShown) {
+      activeConversation._sessionShown = true;
+      showAlert('🔒 Secure session established with ' + activeConversation.name, 'success');
+    }
     updateEncryptionBadge(true);
     // Re-decrypt any messages that arrived before session keys were ready
     await _redecryptActiveConversation(aesKey, hmacKey);
@@ -769,8 +770,24 @@ async function _loadGroupKey(groupId, sessionId) {
     }
     const { bundle } = await res.json();
     if (!bundle) {
-      console.error('[_loadGroupKey] server returned null bundle for groupId', groupId, 'deviceId', SecureStorage.getDeviceId());
-      showAlert('⚠️ No group key found for your device.', 'warning');
+      console.warn('[_loadGroupKey] no bundle for this device — requesting from group members');
+      // New device: ask online members to re-wrap the key for us
+      const myDeviceId = SecureStorage.getDeviceId();
+      const myKeyRes = await apiGet(`${CHAT_API}/users/${currentUser.username}/keys`);
+      if (myKeyRes.ok) {
+        const { devices: myDevs } = await myKeyRes.json();
+        const myDev = myDevs.find(d => d.device_id === myDeviceId);
+        if (myDev) {
+          socket.emit('request_group_key', {
+            group_id: groupId,
+            device_id: myDeviceId,
+            ecdh_public_key: myDev.ecdh_public_key,
+          });
+          showAlert('🔑 Requesting group key from members — retrying in 3s…', 'info');
+          // Retry loading after a short delay to give a member time to re-wrap
+          setTimeout(() => _loadGroupKey(groupId, sessionId), 3000);
+        }
+      }
       return;
     }
 
@@ -1109,6 +1126,24 @@ function onGroupCreated(data) {
   loadGroups();
 }
 
+async function onGroupKeyRequested(data) {
+  // Another member (new device) needs us to re-wrap the group key for their device.
+  const { group_id, device_id, ecdh_public_key } = data;
+  const sessionId = `grp_${group_id}`;
+  const groupKeys = SecureStorage.getSessionKeys(sessionId);
+  if (!groupKeys?.aesKey) return; // We don't have the key either — skip
+
+  try {
+    const bundle = await SecureCrypto.wrapGroupKey(groupKeys.aesKey, groupKeys.hmacKey, ecdh_public_key);
+    await apiPut(`${CHAT_API}/groups/${group_id}/keys`, {
+      encrypted_keys: { [device_id]: bundle },
+    });
+    console.log('[onGroupKeyRequested] re-wrapped key for device', device_id);
+  } catch (e) {
+    console.error('[onGroupKeyRequested] failed to re-wrap key:', e);
+  }
+}
+
 async function deleteGroup(groupId) {
   if (!confirm('Delete this group and all its messages? This cannot be undone.')) return;
   const res = await fetch(`${CHAT_API}/groups/${groupId}`, {
@@ -1193,17 +1228,28 @@ function _convIdForMessage(msg) {
  * "sending" indicator to a delivered/read receipt.
  */
 function _reconcileOutgoing(convId, msg) {
-  // Drop entries whose optimistic bubble no longer exists (e.g. the user
-  // switched conversations — and cleared the thread — before the echo arrived)
-  // so a stale entry can't shadow the match for a later message.
+  // Drop stale entries whose DOM bubble was removed (conversation switch etc.)
   _pendingOutgoing = _pendingOutgoing.filter(p => document.getElementById(`msg-${p.tempId}`));
 
-  const idx = _pendingOutgoing.findIndex(p => p.convId === convId);
+  // Try to match by plaintext first (avoids mis-ordering when messages arrive out of sequence)
+  const incomingText = msg.encrypted_payloads ? null : (msg.plaintext || null);
+  let idx = -1;
+  if (incomingText) {
+    idx = _pendingOutgoing.findIndex(p => {
+      if (p.convId !== convId) return false;
+      const el = document.getElementById(`msg-${p.tempId}`);
+      return el?.querySelector('.msg-body')?.textContent === incomingText;
+    });
+  }
+  // Fallback: oldest pending for this conversation
+  if (idx === -1) idx = _pendingOutgoing.findIndex(p => p.convId === convId);
   if (idx === -1) return;
-  const { tempId } = _pendingOutgoing.splice(idx, 1)[0];
 
+  const { tempId } = _pendingOutgoing.splice(idx, 1)[0];
   const el = document.getElementById(`msg-${tempId}`);
   if (!el) return;
+  // Guard: don't overwrite if another echo already claimed this id
+  if (document.getElementById(`msg-${msg.id}`) && msg.id !== tempId) return;
   el.id = `msg-${msg.id}`;
 
   const receipt = el.querySelector('.msg-receipt');

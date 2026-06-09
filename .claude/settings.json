@@ -1,0 +1,8 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(python -m py_compile app/chat.py)",
+      "Bash(python -m py_compile static/js/chat.js)"
+    ]
+  }
+}

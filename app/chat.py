@@ -604,13 +604,31 @@ def update_group_keys(
     auth=Depends(get_current_user_and_device),
     db: Session = Depends(get_db),
 ):
+    """
+    Distribute encrypted group key bundles to each member's record.
+    body.encrypted_keys = {device_id: bundle, ...}
+    We look up which user owns each device_id and write the bundle into
+    that user's GroupMember.encrypted_group_keys — so every member can
+    retrieve their own bundle with GET /groups/{id}/my-key.
+    """
     current_user, _ = auth
-    member = db.query(GroupMember).filter_by(group_id=group_id, user_id=current_user.id).first()
-    if not member:
+    # Caller must be a member
+    if not db.query(GroupMember).filter_by(group_id=group_id, user_id=current_user.id).first():
         raise HTTPException(status_code=403, detail='Not a member')
-    existing = json.loads(member.encrypted_group_keys or '{}')
-    existing.update(body.encrypted_keys)
-    member.encrypted_group_keys = json.dumps(existing)
+
+    for device_id, bundle in body.encrypted_keys.items():
+        device = db.query(DeviceKey).filter_by(device_id=device_id, is_active=True).first()
+        if not device:
+            continue
+        member = db.query(GroupMember).filter_by(
+            group_id=group_id, user_id=device.user_id
+        ).first()
+        if not member:
+            continue
+        existing = json.loads(member.encrypted_group_keys or '{}')
+        existing[device_id] = bundle
+        member.encrypted_group_keys = json.dumps(existing)
+
     db.commit()
     return {'message': 'Keys updated'}
 

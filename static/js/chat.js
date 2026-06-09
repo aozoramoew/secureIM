@@ -14,6 +14,9 @@ let myEcdsaPrivKey = null;     // CryptoKey object (ECDSA private, in-memory)
 // awaiting the server's `receive_message` echo, used to flip "sending" → "delivered".
 let _pendingOutgoing = [];
 
+// Cache of all known users: id → {id, username, ...} — populated by loadUserList
+const _userMap = {};
+
 // ── Bootstrap ────────────────────────────────────────────────────
 
 async function initChat() {
@@ -309,6 +312,41 @@ async function onSessionReady(data) {
   if (isThisSession) {
     showAlert('🔒 Secure session established with ' + activeConversation.name, 'success');
     updateEncryptionBadge(true);
+    // Re-decrypt any messages that arrived before session keys were ready
+    await _redecryptActiveConversation(aesKey, hmacKey);
+  }
+}
+
+// Re-decrypt messages already in the DOM that were rendered as [Encrypted]
+// because the session key was not yet available when they arrived.
+async function _redecryptActiveConversation(aesKey, hmacKey) {
+  if (!activeConversation || activeConversation.type !== 'dm') return;
+  const otherId = activeConversation.id;
+  const res = await apiGet(`${CHAT_API}/messages/${otherId}`);
+  if (!res.ok) return;
+  const { messages } = await res.json();
+  const deviceId = SecureStorage.getDeviceId();
+
+  for (const msg of messages) {
+    const el = document.getElementById(`msg-${msg.id}`);
+    if (!el) continue;
+    const body = el.querySelector('.msg-body');
+    // Only re-decrypt bubbles that failed previously
+    if (!body || body.textContent !== '🔒 [Encrypted]') continue;
+
+    const payloads = msg.encrypted_payloads || {};
+    const myPayload = payloads[deviceId];
+    if (!myPayload || myPayload.offline_delivery) continue;
+
+    try {
+      const plaintext = await SecureCrypto.decryptMessage(aesKey, hmacKey, myPayload);
+      body.textContent = plaintext;
+      body.classList.remove('deleted-msg');
+      // Update saved copy
+      const convId = getActiveConvId();
+      const enriched = { ...msg, plaintext };
+      if (currentPassword) await SecureStorage.saveMessage(currentPassword, convId, enriched);
+    } catch { /* leave as [Encrypted] if still fails */ }
   }
 }
 
@@ -690,7 +728,9 @@ function buildMessageEl(msg, isMine) {
   div.id        = `msg-${msg.id}`;
   div.className = `message ${isMine ? 'mine' : 'theirs'}`;
 
-  const time = new Date(msg.timestamp).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+  // Append Z so the browser treats the server's UTC timestamp as UTC, not local time
+  const tsStr = msg.timestamp?.endsWith('Z') ? msg.timestamp : msg.timestamp + 'Z';
+  const time = new Date(tsStr).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
 
   if (msg.is_deep_deleted) {
     const body = document.createElement('div');
@@ -889,6 +929,7 @@ async function loadUserList(q = '') {
       return;
     }
     users.forEach(u => {
+      _userMap[u.id] = u;
       const li = document.createElement('li');
       li.className = 'contact-item';
       li.setAttribute('data-user-id', u.id);
@@ -948,14 +989,12 @@ async function createGroup() {
   // Collect all member user IDs including the creator
   const allMemberIds = [...new Set([currentUser.id, ...checked])];
 
-  // Fetch all device public keys for every member, wrap group key per device
+  // Fetch all device public keys for every member, wrap group key per device.
+  // _userMap is populated by loadUserList; currentUser is always known.
   const encryptedKeys = {};  // device_id → wrapped bundle
   for (const uid of allMemberIds) {
-    // Find username for this user id from contacts list
-    const contacts = SecureStorage.getContacts();
-    const contact = contacts.find(c => c.id === uid);
-    const uname = uid === currentUser.id ? currentUser.username : contact?.username;
-    if (!uname) continue;
+    const uname = uid === currentUser.id ? currentUser.username : _userMap[uid]?.username;
+    if (!uname) { console.warn('[createGroup] No username for uid', uid); continue; }
 
     const kr = await apiGet(`${CHAT_API}/users/${uname}/keys`);
     if (!kr.ok) continue;
@@ -1290,6 +1329,7 @@ document.addEventListener('DOMContentLoaded', () => {
       apiGet(`${CHAT_API}/users`).then(r => r.json()).then(data => {
         memberList.innerHTML = '';
         data.users.forEach(u => {
+          _userMap[u.id] = u;  // keep map in sync
           if (u.id === currentUser.id) return;
           const div = document.createElement('div');
           div.className = 'member-item';

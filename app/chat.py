@@ -452,14 +452,21 @@ async def update_session(
     if not sess:
         raise HTTPException(status_code=404, detail='Session not found')
 
+    current_user, _ = auth
     sess.ephemeral_pub_b = body.ephemeral_pub
     sess.ephemeral_sig_b = body.ephemeral_sig
     db.commit()
 
+    responder_device = db.query(DeviceKey).filter_by(
+        user_id=current_user.id, is_active=True
+    ).order_by(DeviceKey.last_seen.desc()).first()
     await _emit_to_user(sess.user_a_id, 'session_ready', {
-        'session_id':      sess.id,
-        'ephemeral_pub_b': sess.ephemeral_pub_b,
-        'ephemeral_sig_b': sess.ephemeral_sig_b,
+        'session_id':         sess.id,
+        'ephemeral_pub_b':    sess.ephemeral_pub_b,
+        'ephemeral_sig_b':    sess.ephemeral_sig_b,
+        'responder_device_id': responder_device.device_id if responder_device else None,
+        'responder_id':       current_user.id,
+        'responder_username': current_user.username,
     })
     return {'session': sess.to_dict()}
 

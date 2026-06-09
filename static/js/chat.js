@@ -104,7 +104,23 @@ function connectSocket(token) {
     showConnectionBanner(false);
   });
 
-  socket.on('user_online',  d => updateUserStatus(d.user_id, true));
+  socket.on('user_online', d => {
+    updateUserStatus(d.user_id, true);
+    // If we have an active DM with this user and no session keys yet,
+    // re-initiate now that they're online (session_request may have been lost).
+    if (
+      activeConversation?.type === 'dm' &&
+      activeConversation.id === d.user_id &&
+      activeConversation.sessionId
+    ) {
+      const keys = SecureStorage.getSessionKeys(activeConversation.sessionId);
+      if (!keys?.aesKey) {
+        initiateSession(activeConversation.id, activeConversation.username).then(sess => {
+          if (sess) activeConversation.sessionId = sess.id;
+        });
+      }
+    }
+  });
   socket.on('user_offline', d => updateUserStatus(d.user_id, false));
 
   socket.on('session_request', onSessionRequest);
@@ -167,14 +183,31 @@ async function onSessionRequest(data) {
   const { devices } = await keysRes.json();
   if (!devices.length) { showAlert('❌ No device keys found for sender', 'error'); return; }
 
-  // Match the exact device that signed the ephemeral key; fall back to most recent.
-  const signingDevice = initiator_device_id
-    ? (devices.find(d => d.device_id === initiator_device_id) || devices[0])
-    : devices[0];
+  // Try the device that signed first (identified by device_id from server),
+  // then fall back to verifying against ALL active devices for this user.
+  // This handles the case where the initiator is on a new device whose key
+  // was just registered — the server sends the correct device_id to match.
+  let isValid = false;
+  const primaryDevice = initiator_device_id
+    ? devices.find(d => d.device_id === initiator_device_id)
+    : null;
 
-  const isValid = await SecureCrypto.verifySignature(
-    signingDevice.ecdsa_public_key, ephemeral_pub_a, ephemeral_sig_a
-  );
+  if (primaryDevice) {
+    isValid = await SecureCrypto.verifySignature(
+      primaryDevice.ecdsa_public_key, ephemeral_pub_a, ephemeral_sig_a
+    );
+  }
+  // If primary device check failed or no device_id given, try all devices
+  if (!isValid) {
+    for (const dev of devices) {
+      if (dev === primaryDevice) continue;
+      isValid = await SecureCrypto.verifySignature(
+        dev.ecdsa_public_key, ephemeral_pub_a, ephemeral_sig_a
+      );
+      if (isValid) break;
+    }
+  }
+
   if (!isValid) {
     showAlert('⛔ KEY EXCHANGE SIGNATURE INVALID — Possible MitM attack! Session aborted.', 'error');
     console.error('[SecureIM] MitM detected: ephemeral key signature verification failed for', initiator);
@@ -200,34 +233,67 @@ async function onSessionRequest(data) {
 
 
 async function onSessionReady(data) {
-  const { session_id, ephemeral_pub_b, ephemeral_sig_b } = data;
+  const {
+    session_id, ephemeral_pub_b, ephemeral_sig_b,
+    responder_device_id, responder_username,
+  } = data;
+
   const stored = SecureStorage.getSessionKeys(session_id);
-  if (!stored || !stored.myEphemeral) return;
 
-  // ── Verify Bob's ephemeral key signature BEFORE computing shared secret ──
-  // Resolve the responder's username: use active conversation if it matches,
-  // otherwise look up from the contacts list (handles background reconnect).
-  const isThisSession = activeConversation?.sessionId === session_id;
-  let responderUsername = isThisSession ? activeConversation?.username : null;
-
-  if (!responderUsername) {
-    // Find the contact whose session_id matches by checking stored contacts
-    const contacts = SecureStorage.getContacts();
-    const match = contacts.find(c => c._pendingSessionId === session_id);
-    if (match) responderUsername = match.username;
+  // If we have no in-memory state for this session (e.g. page was refreshed),
+  // the other side already completed their half. We need to start a fresh
+  // handshake — look up who the responder is and re-initiate toward them.
+  if (!stored || !stored.myEphemeral) {
+    const resolvedUsername = responder_username
+      || (() => {
+        const contacts = SecureStorage.getContacts();
+        return contacts.find(c => c._pendingSessionId === session_id)?.username;
+      })();
+    if (resolvedUsername && activeConversation?.username === resolvedUsername) {
+      console.log('[SecureIM] Lost session state — re-initiating with', resolvedUsername);
+      const sess = await initiateSession(activeConversation.id, resolvedUsername);
+      if (sess) activeConversation.sessionId = sess.id;
+    }
+    return;
   }
 
-  if (responderUsername && ephemeral_sig_b) {
-    const keysRes = await apiGet(`${CHAT_API}/users/${responderUsername}/keys`);
+  const isThisSession = activeConversation?.sessionId === session_id;
+
+  // ── Verify the responder's ECDSA signature BEFORE computing shared secret ──
+  // Use the device_id from the server event to pick the exact signing device.
+  const verifyUsername = responder_username
+    || (isThisSession ? activeConversation?.username : null)
+    || (() => {
+      const contacts = SecureStorage.getContacts();
+      return contacts.find(c => c._pendingSessionId === session_id)?.username;
+    })();
+
+  if (verifyUsername && ephemeral_sig_b) {
+    const keysRes = await apiGet(`${CHAT_API}/users/${verifyUsername}/keys`);
     if (keysRes.ok) {
       const { devices } = await keysRes.json();
       if (devices.length) {
-        const isValid = await SecureCrypto.verifySignature(
-          devices[0].ecdsa_public_key, ephemeral_pub_b, ephemeral_sig_b
-        );
+        const primaryDev = responder_device_id
+          ? devices.find(d => d.device_id === responder_device_id)
+          : null;
+        let isValid = false;
+        if (primaryDev) {
+          isValid = await SecureCrypto.verifySignature(
+            primaryDev.ecdsa_public_key, ephemeral_pub_b, ephemeral_sig_b
+          );
+        }
+        if (!isValid) {
+          for (const dev of devices) {
+            if (dev === primaryDev) continue;
+            isValid = await SecureCrypto.verifySignature(
+              dev.ecdsa_public_key, ephemeral_pub_b, ephemeral_sig_b
+            );
+            if (isValid) break;
+          }
+        }
         if (!isValid) {
           showAlert('⛔ KEY EXCHANGE SIGNATURE INVALID — MitM attack detected! Aborting session.', 'error');
-          console.error('[SecureIM] MitM detected: session_ready signature verification failed');
+          console.error('[SecureIM] MitM detected: session_ready signature failed for', verifyUsername);
           SecureStorage.clearSessionKeys(session_id);
           if (isThisSession) updateEncryptionBadge(false);
           return;  // ABORT

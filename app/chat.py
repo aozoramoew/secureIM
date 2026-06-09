@@ -120,10 +120,13 @@ async def connect(sid, environ, auth):
         # These are messages addressed to this user that were stored in DB but
         # not yet received over a socket (offline_delivery=true in payload means
         # they were encrypted with the static ECDH key — no session needed).
+        # Only replay messages that were never delivered (recipient was offline when sent).
+        # delivered_at=None means the recipient had not yet received the message.
         missed = db.query(Message).filter(
             Message.recipient_id == user.id,
             Message.is_deep_deleted == False,  # noqa: E712
             Message.group_id == None,          # noqa: E711  DM only
+            Message.delivered_at == None,      # noqa: E711  not yet delivered
         ).order_by(Message.timestamp.asc()).limit(200).all()
 
         for msg in missed:
@@ -133,8 +136,12 @@ async def connect(sid, environ, auth):
             sender = db.get(User, msg.sender_id)
             msg_dict = msg.to_dict(requesting_user_id=user.id)
             msg_dict['sender_username'] = sender.username if sender else ''
-            msg_dict['session_id'] = None  # client uses offline_delivery flag
+            msg_dict['session_id'] = None  # client uses offline_delivery flag in payload
             await sio.emit('receive_message', msg_dict, room=sid)
+            # Mark delivered now that we've pushed it to the socket
+            msg.delivered_at = datetime.utcnow()
+
+        db.commit()
     finally:
         db.close()
 
@@ -225,11 +232,17 @@ async def send_message(sid, data):
             if expires_seconds:
                 expires_at = datetime.utcnow() + timedelta(seconds=int(expires_seconds))
 
+            # Only mark delivered immediately if recipient is currently online.
+            # If offline, leave delivered_at=None so the connect handler can
+            # replay only undelivered messages (avoids duplicate delivery).
+            recipient_is_online = any(
+                v['user_id'] == recipient_id for v in _connected_sids.values()
+            )
             msg = Message(
                 sender_id=sender.id,
                 recipient_id=recipient_id,
                 encrypted_payloads=payloads_json,
-                delivered_at=datetime.utcnow(),
+                delivered_at=datetime.utcnow() if recipient_is_online else None,
                 expires_at=expires_at,
             )
             db.add(msg)
@@ -335,6 +348,19 @@ def list_users(
         d['is_online'] = any(info['user_id'] == u.id for info in _connected_sids.values())
         result.append(d)
     return {'users': result}
+
+
+@router.get('/users/by-id/{user_id}/keys')
+def get_user_keys_by_id(
+    user_id: int,
+    auth=Depends(get_current_user_and_device),
+    db: Session = Depends(get_db),
+):
+    user = db.get(User, user_id)
+    if not user:
+        raise HTTPException(status_code=404, detail='User not found')
+    devices = db.query(DeviceKey).filter_by(user_id=user.id, is_active=True).all()
+    return {'user_id': user.id, 'username': user.username, 'devices': [d.to_dict() for d in devices]}
 
 
 @router.get('/users/{username}/keys')

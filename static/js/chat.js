@@ -989,15 +989,11 @@ async function createGroup() {
   // Collect all member user IDs including the creator
   const allMemberIds = [...new Set([currentUser.id, ...checked])];
 
-  // Fetch all device public keys for every member, wrap group key per device.
-  // _userMap is populated by loadUserList; currentUser is always known.
+  // Fetch device public keys for every member by user_id, wrap group key per device
   const encryptedKeys = {};  // device_id → wrapped bundle
   for (const uid of allMemberIds) {
-    const uname = uid === currentUser.id ? currentUser.username : _userMap[uid]?.username;
-    if (!uname) { console.warn('[createGroup] No username for uid', uid); continue; }
-
-    const kr = await apiGet(`${CHAT_API}/users/${uname}/keys`);
-    if (!kr.ok) continue;
+    const kr = await apiGet(`${CHAT_API}/users/by-id/${uid}/keys`);
+    if (!kr.ok) { console.warn('[createGroup] Failed to fetch keys for uid', uid); continue; }
     const { devices } = await kr.json();
     for (const dev of devices) {
       encryptedKeys[dev.device_id] = await SecureCrypto.wrapGroupKey(

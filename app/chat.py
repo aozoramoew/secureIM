@@ -674,18 +674,25 @@ def update_group_keys(
     if not db.query(GroupMember).filter_by(group_id=group_id, user_id=current_user.id).first():
         raise HTTPException(status_code=403, detail='Not a member')
 
+    import logging
+    logger = logging.getLogger(__name__)
+    logger.info('[update_group_keys] group=%d received device_ids=%s', group_id, list(body.encrypted_keys.keys()))
+
     for device_id, bundle in body.encrypted_keys.items():
         device = db.query(DeviceKey).filter_by(device_id=device_id, is_active=True).first()
         if not device:
+            logger.warning('[update_group_keys] device_id %s not found or inactive', device_id)
             continue
         member = db.query(GroupMember).filter_by(
             group_id=group_id, user_id=device.user_id
         ).first()
         if not member:
+            logger.warning('[update_group_keys] no GroupMember for group=%d user=%d', group_id, device.user_id)
             continue
         existing = json.loads(member.encrypted_group_keys or '{}')
         existing[device_id] = bundle
         member.encrypted_group_keys = json.dumps(existing)
+        logger.info('[update_group_keys] stored bundle for user=%d device=%s', device.user_id, device_id)
 
     db.commit()
     return {'message': 'Keys updated'}

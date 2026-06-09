@@ -745,16 +745,34 @@ async function _loadGroupKey(groupId, sessionId) {
   const existing = SecureStorage.getSessionKeys(sessionId);
   if (existing?.aesKey) return;
 
+  if (!myEcdhPrivKey) {
+    console.error('[_loadGroupKey] myEcdhPrivKey not ready yet');
+    showAlert('⚠️ Keys not unlocked yet — cannot load group key.', 'warning');
+    return;
+  }
+
   try {
     const res = await apiGet(`${CHAT_API}/groups/${groupId}/my-key`);
-    if (!res.ok) { showAlert('⚠️ Could not load group key — messages cannot be decrypted.', 'warning'); return; }
+    if (!res.ok) {
+      const errText = await res.text().catch(() => '');
+      console.error('[_loadGroupKey] HTTP', res.status, errText);
+      showAlert('⚠️ Could not load group key — messages cannot be decrypted.', 'warning');
+      return;
+    }
     const { bundle } = await res.json();
-    if (!bundle) { showAlert('⚠️ No group key found for your device.', 'warning'); return; }
+    if (!bundle) {
+      console.error('[_loadGroupKey] server returned null bundle for groupId', groupId, 'deviceId', myDeviceId);
+      showAlert('⚠️ No group key found for your device.', 'warning');
+      return;
+    }
 
+    console.log('[_loadGroupKey] unwrapping bundle for group', groupId, 'device', myDeviceId);
     const { aesKey, hmacKey } = await SecureCrypto.unwrapGroupKey(bundle, myEcdhPrivKey);
     SecureStorage.storeSessionKeys(sessionId, aesKey, hmacKey, null);
     updateEncryptionBadge(true);
+    console.log('[_loadGroupKey] group key loaded OK for', sessionId);
   } catch (e) {
+    console.error('[_loadGroupKey] unwrapGroupKey threw:', e);
     showAlert('❌ Failed to load group key: ' + e.message, 'error');
   }
 }
@@ -1035,16 +1053,20 @@ async function createGroup() {
     const kr = await apiGet(`${CHAT_API}/users/by-id/${uid}/keys`);
     if (!kr.ok) { console.warn('[createGroup] Failed to fetch keys for uid', uid); continue; }
     const { devices } = await kr.json();
+    console.log('[createGroup] uid', uid, 'has devices:', devices.map(d => d.device_id));
     for (const dev of devices) {
       try {
         encryptedKeys[dev.device_id] = await SecureCrypto.wrapGroupKey(
           aesKey, hmacKey, dev.ecdh_public_key
         );
+        console.log('[createGroup] wrapped key for device', dev.device_id);
       } catch (e) {
         console.error('[createGroup] wrapGroupKey failed for device', dev.device_id, e);
       }
     }
   }
+
+  console.log('[createGroup] encryptedKeys device_ids:', Object.keys(encryptedKeys));
 
   if (Object.keys(encryptedKeys).length === 0) {
     showAlert('❌ Could not wrap group key for any device. Aborting.', 'error');
@@ -1055,10 +1077,17 @@ async function createGroup() {
   const res = await apiPost(`${CHAT_API}/groups`, { name, member_ids: checked });
   if (!res.ok) { showAlert('❌ Failed to create group', 'error'); return; }
   const { group } = await res.json();
+  console.log('[createGroup] group created id=', group.id, 'uploading', Object.keys(encryptedKeys).length, 'device bundles');
 
   // Upload encrypted group keys for all member devices
   const keysRes = await apiPut(`${CHAT_API}/groups/${group.id}/keys`, { encrypted_keys: encryptedKeys });
-  if (!keysRes.ok) { console.error('[createGroup] Failed to upload group keys', await keysRes.text()); }
+  if (!keysRes.ok) {
+    const errText = await keysRes.text().catch(() => '');
+    console.error('[createGroup] Failed to upload group keys:', keysRes.status, errText);
+    showAlert('❌ Failed to distribute group keys — members may not be able to read messages.', 'error');
+  } else {
+    console.log('[createGroup] group keys uploaded OK');
+  }
 
   nameEl.value = '';
   closeModal('group-modal');

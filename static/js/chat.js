@@ -761,12 +761,12 @@ async function _loadGroupKey(groupId, sessionId) {
     }
     const { bundle } = await res.json();
     if (!bundle) {
-      console.error('[_loadGroupKey] server returned null bundle for groupId', groupId, 'deviceId', myDeviceId);
+      console.error('[_loadGroupKey] server returned null bundle for groupId', groupId, 'deviceId', SecureStorage.getDeviceId());
       showAlert('⚠️ No group key found for your device.', 'warning');
       return;
     }
 
-    console.log('[_loadGroupKey] unwrapping bundle for group', groupId, 'device', myDeviceId);
+    console.log('[_loadGroupKey] unwrapping bundle for group', groupId, 'device', SecureStorage.getDeviceId());
     const { aesKey, hmacKey } = await SecureCrypto.unwrapGroupKey(bundle, myEcdhPrivKey);
     SecureStorage.storeSessionKeys(sessionId, aesKey, hmacKey, null);
     updateEncryptionBadge(true);

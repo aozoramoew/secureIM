@@ -23,9 +23,8 @@ class User(Base):
     __tablename__ = 'users'
 
     id            = Column(Integer, primary_key=True)
-    username      = Column(String(80),  unique=True, nullable=False, index=True)
-    email         = Column(String(120), unique=True, nullable=False, index=True)
-    password_hash = Column(String(256), nullable=False)   # argon2id
+    username      = Column(String(80), unique=True, nullable=False, index=True)
+    password_hash = Column(String(256), nullable=False)
     created_at    = Column(DateTime, default=datetime.utcnow)
     # JSON blob: {store_history: bool, session_mode: bool}
     settings          = Column(Text, default='{"store_history":true,"session_mode":false}')
@@ -49,7 +48,6 @@ class User(Base):
         return {
             'id':       self.id,
             'username': self.username,
-            'email':    self.email,
             'settings': self.get_settings(),
         }
 

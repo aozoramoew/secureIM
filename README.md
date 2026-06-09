@@ -1,313 +1,348 @@
-# SecureIM — Zero-Trust End-to-End Encrypted Messaging System
+# SecureIM — Zero-Trust End-to-End Encrypted Messaging
 
-> A cross-platform instant messaging web application that prioritizes user privacy and data integrity through modern cryptographic primitives.
+A web-based instant messaging system that implements **Zero-Trust architecture**: the server is a dumb relay that stores only ciphertext and public keys. All cryptographic operations happen in the browser using the native Web Crypto API — no third-party crypto library required.
 
 ---
 
-## 1. Project Overview
-
-SecureIM is built on a **Zero-Trust architecture**: the central server is treated as an untrusted relay that possesses no technical means to access plaintext message content. All encryption and decryption occur exclusively on the user's device inside the browser's native Web Crypto API sandbox.
-
-### Threat Model
+## Threat Model
 
 | Threat | Mitigation |
 |---|---|
-| **Eavesdropping** | AES-256-GCM E2EE — server stores only ciphertext |
-| **Identity Spoofing** | ECDSA P-384 identity key pairs per device + key fingerprint out-of-band verification |
-| **Man-in-the-Middle (MitM)** | ECDH ephemeral key exchange + HMAC-SHA256 per message — any relay tampering is detectable |
-| **Replay Attacks** | Per-message random nonce (GCM IV) + timestamp; replayed messages have mismatching nonces |
-| **Bit-Flipping** | AES-GCM authentication tag + explicit HMAC-SHA256 both reject any modified ciphertext |
-| **Server-Side Compromise** | Server holds zero plaintext. Compromising the DB yields only ciphertext blobs, Argon2id hashes, and public keys |
-| **Credential Theft** | Argon2id (m=64MB, t=3, p=4) password hashing; private keys encrypted client-side with PBKDF2-AES-256-GCM |
-| **Forward Secrecy violation** | Fresh ephemeral ECDH keys per session; key rotation every 100 messages |
+| Eavesdropping | AES-256-GCM E2EE — server stores only ciphertext |
+| Identity spoofing | ECDSA P-384 per-device identity keys; ephemeral keys are signed before exchange |
+| Man-in-the-Middle | ECDH ephemeral key exchange + ECDSA signature verification on both sides |
+| Replay attacks | 96-bit random GCM nonce per message; replayed nonces fail GCM auth tag |
+| Bit-flipping | AES-GCM auth tag + independent HMAC-SHA256 both reject any modified ciphertext |
+| Server-side compromise | DB holds zero plaintext — only ciphertext blobs, Argon2id hashes, public keys |
+| Credential theft | Argon2id (m=64MB, t=3, p=4) server-side; private keys encrypted client-side with PBKDF2-AES-256-GCM |
+| Forward secrecy violation | Fresh ephemeral ECDH key pair per session; automatic rotation every 100 messages |
 
 ---
 
-## 2. Core Technical Requirements
+## Core Technical Requirements
 
 ### ✅ End-to-End Encryption (E2EE)
-- Every message payload is encrypted with **AES-256-GCM** in the sender's browser before transmission
-- The server receives and stores only a JSON blob of base64-encoded ciphertexts
-- Decryption happens exclusively in the recipient's browser
-- For multi-device users, the payload is encrypted separately for each registered device key
-- **The server has no technical means to access plaintext** — even with full database access
 
-**Implementation:** `static/js/crypto.js` → `encryptMessage()` / `decryptMessage()`  
-**Server relay:** `app/chat.py` → `on_send_message()` stores `encrypted_payloads` JSON without parsing plaintext
+Every message is encrypted **in the sender's browser** before leaving the device. The server receives and stores a JSON blob of base64-encoded ciphertext — it never sees plaintext.
+
+**How it works:**
+1. After ECDH handshake both parties hold the same `aesKey` (in RAM only)
+2. Sender: `encryptMessage(aesKey, hmacKey, plaintext)` → `{ ciphertext, nonce, hmac }`
+3. Server receives ciphertext, stores it, forwards to recipient's socket room
+4. Recipient: `decryptMessage(aesKey, hmacKey, payload)` → plaintext rendered in UI
+5. For multi-device users, the payload is encrypted separately per registered device key
+
+**Files:** [`static/js/crypto.js`](static/js/crypto.js) → `encryptMessage()` / `decryptMessage()`  
+**Server relay:** [`app/chat.py`](app/chat.py) → `send_message` SocketIO handler stores `encrypted_payloads` as-is
 
 ---
 
 ### ✅ Cryptographic Key Exchange (ECDH)
-- Uses **Elliptic Curve Diffie-Hellman (ECDH) with curve P-256**
-- Both parties independently generate ephemeral ECDH key pairs and exchange **only their public keys** via the server relay
-- Both compute the same `shared_secret = ECDH(myPrivate, theirPublic)` — the shared secret is never transmitted
-- **HKDF (HMAC-based Key Derivation Function)** with SHA-256 stretches the shared secret into:
-  - A 256-bit AES-GCM session key (info = `SecureIM-v1-session-key`)
-  - A 256-bit HMAC-SHA256 key (info = `SecureIM-v1-hmac-key`)
-- Domain-separated derivation prevents key reuse between encryption and authentication
+
+Uses **Elliptic Curve Diffie-Hellman (P-256)** so both parties compute the same shared secret without transmitting it. The shared secret is stretched via **HKDF-SHA256** into two independent keys:
+- `SecureIM-v1-session-key` → 256-bit AES-GCM key
+- `SecureIM-v1-hmac-key` → 256-bit HMAC-SHA256 key
 
 **Handshake flow:**
-1. Alice POSTs her ephemeral public key to `/api/chat/sessions`
-2. Server stores it and notifies Bob via SocketIO `session_request`
-3. Bob generates his ephemeral key pair, derives session keys, PUTs his public key to `/api/chat/sessions/<id>`
-4. Server notifies Alice via `session_ready` with Bob's public key
-5. Alice derives the same session keys — handshake complete
+```
+Alice                           Server                          Bob
+  │                               │                              │
+  ├─ generateEphemeralKeyPair()   │                              │
+  ├─ sign(ephA_pub, ecdsaPriv)    │                              │
+  ├─ POST /sessions ─────────────►│                              │
+  │                               ├─ emit session_request ──────►│
+  │                               │                              ├─ verify Alice's ECDSA sig ✓
+  │                               │                              ├─ generateEphemeralKeyPair()
+  │                               │                              ├─ deriveSessionKey(ephB_priv, ephA_pub)
+  │                               │                              ├─ sign(ephB_pub, ecdsaPriv)
+  │                               │◄── PUT /sessions/{id} ───────┤
+  │                               ├─ emit session_ready ────────►│
+  │◄── session_ready ─────────────┤                              │
+  ├─ verify Bob's ECDSA sig ✓     │                              │
+  ├─ deriveSessionKey(ephA_priv, ephB_pub)                       │
+  │  ↳ same aesKey as Bob ✓       │                              │
+```
 
-**Implementation:** `static/js/crypto.js` → `generateEphemeralKeyPair()`, `deriveSessionKey()`, `deriveHMACKey()`
+**Files:** [`static/js/crypto.js`](static/js/crypto.js) → `generateEphemeralKeyPair()`, `deriveSessionKey()`, `deriveHMACKey()`  
+**Session tracking:** [`app/models.py`](app/models.py) → `ChatSession`; [`app/chat.py`](app/chat.py) → `create_session()`, `update_session()`
 
 ---
 
 ### ✅ Data Integrity & Authenticity
-Every encrypted message carries **two independent integrity checks**:
 
-1. **AES-256-GCM authentication tag** (built into GCM mode) — any bit modification to the ciphertext causes decryption to fail
-2. **HMAC-SHA256** computed over `nonce || ciphertext` using the separately derived HMAC key — provides an explicit, independently verifiable MAC
+Each message carries **two independent integrity checks**:
 
-On receipt, the client **verifies the HMAC before attempting decryption**. A tampered or replayed message is rejected with an error displayed to the user.
+1. **AES-256-GCM authentication tag** — built into GCM mode; any bit modification to ciphertext fails decryption
+2. **HMAC-SHA256** over `nonce ‖ ciphertext` using the separately derived HMAC key
 
-**Implementation:** `static/js/crypto.js` → `encryptMessage()` computes both; `decryptMessage()` verifies HMAC first
+The client verifies the HMAC **before** attempting AES-GCM decryption. A tampered or replayed message is rejected and shown as an error in the UI.
+
+**Files:** [`static/js/crypto.js`](static/js/crypto.js) → `encryptMessage()` computes both; `decryptMessage()` verifies HMAC first, then decrypts
 
 ---
 
 ### ✅ Forward Secrecy
-- **Session-level forward secrecy:** Each DM session uses a **fresh ephemeral ECDH key pair** generated at session start. Compromising a user's long-term identity key reveals nothing about past sessions.
-- **Key rotation:** After every **100 messages**, the server emits a `key_rotation_required` event. Both clients discard the old session key and initiate a new ECDH handshake with fresh ephemeral keys.
-- Group sessions use a per-session symmetric key distributed via ECDH to each member.
 
-**Implementation:** `app/chat.py` → `on_send_message()` tracks `session.message_count`; `static/js/chat.js` → `onKeyRotationRequired()`
+- **Per-session ephemeral keys:** each DM session generates a fresh ECDH key pair. Compromising a user's long-term ECDSA identity key reveals nothing about past sessions because the ephemeral private keys are never persisted — they live only in JavaScript memory and vanish when the tab is closed.
+- **Automatic key rotation:** after every 100 messages, the server emits `key_rotation_required`. Both clients discard the old session key and initiate a new ECDH handshake with fresh ephemeral keys.
+
+**Files:** [`app/chat.py`](app/chat.py) line ~182 → `message_count >= KEY_ROTATION_THRESHOLD`;  
+[`static/js/chat.js`](static/js/chat.js) → `onKeyRotationRequired()`
 
 ---
 
-## 3. Key Features
+## Key Features
 
 ### ✅ 1. Identity Management
-- On registration, the browser generates two key pairs via Web Crypto API:
-  - **ECDSA P-384** identity key pair — used for signing and key fingerprinting
-  - **ECDH P-256** static key pair — used for initial key exchange and multi-device delivery
-- **Private keys never leave the device** — they are encrypted with a PBKDF2-derived key before being stored in `localStorage`
-- Public keys are uploaded to the server and associated with the user account
-- Each additional device registers its own key pair; the server maintains a `device_keys` table
-- **2FA via email link** is required for every new device login (15-minute expiry, single-use token)
-- **Key fingerprints** (first 16 bytes of SHA-256(publicKey)) are displayed for out-of-band verification
 
-**Implementation:** `app/models.py` → `User`, `DeviceKey`; `app/auth.py`; `static/js/crypto.js` → `generateIdentityKeyPair()`, `computeFingerprint()`
+**Requirement:** identities linked to public/private key pairs (RSA-4096 or equivalent)
+
+**Implementation:**  
+On registration, the browser generates two key pairs via Web Crypto API:
+- **ECDSA P-384** — long-term identity key used to sign ephemeral keys (prevents MitM substitution)
+- **ECDH P-256** — used for key exchange
+
+Private keys are encrypted with PBKDF2-derived AES-256-GCM key (password as passphrase) and stored in `localStorage`. They never leave the device in plaintext. Only public keys are uploaded to the server.
+
+Each browser/device registers its own key pair in the `device_keys` table. New device logins generate a new key pair automatically.
+
+**Key fingerprint:** SHA-256 of the ECDSA public key, displayed as `XX:XX:XX:…` hex pairs for out-of-band verification.
+
+**Files:** [`static/js/auth.js`](static/js/auth.js) → `handleRegister()`, `handleLogin()`;  
+[`app/auth.py`](app/auth.py) → `register()`, `login()`;  
+[`app/models.py`](app/models.py) → `User`, `DeviceKey`;  
+[`static/js/crypto.js`](static/js/crypto.js) → `generateIdentityKeyPair()`, `computeFingerprint()`
 
 ---
 
 ### ✅ 2. Session Orchestration
-- Sessions are tracked in the `chat_sessions` table with ephemeral public keys and message counts
-- **Key rotation policy:** automatic rotation every 100 messages (configurable via `KEY_ROTATION_THRESHOLD` in `config.py`)
-- **Session termination:** logging out deactivates the device; the session key is never persisted — it exists only in memory (`SecureStorage._sessionKeys`)
-- **Multi-device:** when a user registers a new device, existing sessions continue uninterrupted; the new device receives its own encrypted copy of messages going forward
-- Group membership changes (join/leave) trigger group key version increment, signalling clients to rotate the group symmetric key
 
-**Implementation:** `app/models.py` → `ChatSession`; `app/chat.py` → `create_session()`, `on_key_rotation_required()`; `static/js/chat.js` → `initiateSession()`, `onKeyRotationRequired()`
+**Requirement:** initialize, maintain, and terminate secure sessions; key rotation for long-term conversations
+
+**Implementation:**
+- **Init:** `initiateSession()` generates ephemeral ECDH key pair, signs it with ECDSA identity key, POSTs to server → server forwards to recipient via SocketIO
+- **Maintain:** server tracks `ChatSession` with `message_count`; emits `key_rotation_required` at threshold (default 100, configurable via `KEY_ROTATION_THRESHOLD` env var)
+- **Rotate:** client clears old session keys from memory, re-runs full ECDH handshake with new ephemeral keys
+- **Reconnect:** when a user reconnects after being offline, the server replays any pending `session_request` events they missed
+- **Terminate:** closing the tab discards all ephemeral keys; logout deactivates the device record
+
+**Files:** [`app/chat.py`](app/chat.py) → `create_session()`, `update_session()`, `connect()` (pending replay);  
+[`static/js/chat.js`](static/js/chat.js) → `initiateSession()`, `onSessionRequest()`, `onSessionReady()`, `onKeyRotationRequired()`
 
 ---
 
 ### ✅ 3. Secure Local Storage
-All client-side data is protected at rest:
 
-| Data | Encryption |
-|---|---|
-| ECDSA private key | AES-256-GCM, key = PBKDF2(password, random-salt, 310,000 iter, SHA-256) |
-| ECDH private key | AES-256-GCM, key = PBKDF2(password, random-salt, 310,000 iter, SHA-256) |
-| Chat history | AES-256-GCM, key = PBKDF2(password, stored-salt, 310,000 iter, SHA-256) |
-| Contact list | Plaintext (non-sensitive metadata) |
-| Auth JWT | Plaintext in localStorage (standard web practice) |
+**Requirement:** AES-256-GCM with PBKDF2 or Argon2 for client-side data
 
-- **PBKDF2 iterations:** 310,000 — meets OWASP 2023 recommendation for PBKDF2-SHA256
-- **Session mode:** when enabled, current-session messages are held only in memory (JS heap) and never written to `localStorage`. Older persisted history remains intact.
-- **Store History toggle:** when disabled, no messages are written to `localStorage` at all
-- On the unlock screen, the user enters their password to decrypt keys — wrong password = cannot decrypt = access denied
+**Implementation:**
 
-**Implementation:** `static/js/crypto.js` → `encryptForStorage()`, `decryptFromStorage()`, `deriveStorageKey()`; `static/js/storage.js`
+| Data | Storage | Encryption |
+|---|---|---|
+| ECDSA private key | `localStorage` (sim_identity) | AES-256-GCM, key = PBKDF2(password, random-salt, **310 000 iter**, SHA-256) |
+| ECDH private key | `localStorage` (sim_identity) | same as above |
+| Chat history | `localStorage` (sim_hist_*) | AES-256-GCM, key = PBKDF2(password, stored-salt, 310 000 iter, SHA-256) |
+| Ephemeral session keys | JavaScript RAM only | never persisted |
+| Auth JWT | `localStorage` (plaintext) | standard web practice — short-lived (30 days) |
+
+- **310 000 PBKDF2-SHA256 iterations** — exceeds OWASP 2023 minimum (260 000)
+- **Random 32-byte salt** generated per encryption operation
+- **Session mode:** when enabled, current-session messages are held in JS memory only, never written to `localStorage`
+- **Unlock screen:** on returning to the tab, the user re-enters their password to decrypt private keys from `localStorage` — wrong password = cannot derive key = cannot decrypt = access denied
+
+**Files:** [`static/js/crypto.js`](static/js/crypto.js) → `deriveStorageKey()`, `encryptForStorage()`, `decryptFromStorage()`;  
+[`static/js/storage.js`](static/js/storage.js) → `saveIdentityKeys()`, `loadIdentityKeys()`, `saveMessage()`, `getConversation()`
 
 ---
 
 ### ✅ 4. Security UI/UX
 
-| Indicator | Location | Meaning |
-|---|---|---|
-| 🔒 **E2EE Active** (green badge) | Chat header | ECDH handshake complete, AES session key established |
-| ⏳ **Establishing session…** (amber badge) | Chat header | Key exchange in progress |
-| ✅ **Verified** (green label) | Contact sidebar | User has manually verified this contact's public key fingerprint out-of-band |
-| 🔒 (lock icon per message) | Each message bubble | Confirms that specific message was E2EE encrypted |
-| ⚠️ **HMAC verification failed** | Message body | Message was tampered in transit — displayed in red |
-| 🗑️ **This message was deleted** | Message body | Deep-delete applied — shown to both parties |
-| 🔴 / 🟢 dot | Contact sidebar | Online / Offline presence indicator |
-| 📧 **2FA waiting** | Login page | Polling for device authorization after email link sent |
-| **Fingerprint dialog** | "Verify Keys" button | Displays SHA-256 fingerprint of contact's ECDSA public key for out-of-band comparison |
+**Requirement:** visual indicators of encryption status; "Verified" badges for out-of-band verified contacts
 
-**Implementation:** `templates/chat.html`, `static/js/chat.js` → `updateEncryptionBadge()`, `renderMessage()`, `verifyContact()`
+**Implementation:**
+
+| Indicator | Where | Meaning |
+|---|---|---|
+| `⏳ Establishing…` (amber) | Chat header badge | ECDH handshake in progress |
+| `🔒 E2EE Active` (cyan) | Chat header badge | Session keys established, AES-256-GCM active |
+| `✅ Verified` label | Contact in sidebar | You have manually verified this contact's key fingerprint out-of-band |
+| `⛔ KEY EXCHANGE INVALID` alert | Full-width error | ECDSA signature verification failed during handshake — possible MitM |
+| `⚠️ HMAC verification failed` | Message body | Message was tampered in transit |
+| `🗑️ This message was deleted` | Message body | Deep-delete applied by sender |
+| 🟢 / ⚫ dot | Sidebar contact | Online / offline presence |
+
+**Fingerprint verification flow:** click "Verify Keys" on a contact → SHA-256 fingerprint shown → user compares via phone/in-person → mark as Verified → `✅` badge appears.
+
+**Files:** [`templates/chat.html`](templates/chat.html);  
+[`static/js/chat.js`](static/js/chat.js) → `updateEncryptionBadge()`, `verifyContact()`, `renderMessage()`
 
 ---
 
-## 4. Additional Features
+## Additional Features
 
-### Message Deletion Modes
-- **Delete for me** — removes message from local `localStorage` and hides it in the UI; the other party is unaffected
-- **Deep delete** — marks message as `is_deep_deleted=True` on the server; both parties see "🗑️ This message was deleted"; the encrypted payload remains but is ignored by both clients
-- Accessible via the `⋯` action button on each message bubble
+### Message Deletion
+- **Delete for me** — removes from local `localStorage` and hides in UI; other party unaffected
+- **Deep delete** — server marks `is_deep_deleted=True` and clears ciphertext; both parties see `🗑️ This message was deleted`
 
 ### Group Chat
-- Create groups with any set of users; group admin can manage members
-- Group messages are encrypted with a symmetric group key
+- Group messages encrypted with a per-group symmetric AES key
 - Group key version increments on membership changes; clients re-exchange keys
+- Each member receives an encrypted copy of the group key via their ECDH public key
 
-### Multi-Device Support
-- Each browser/device registers its own ECDSA + ECDH key pair
-- 2FA via email link is required for every new device
-- Devices can be revoked from the account settings (REST API)
-- Messages are delivered to all active devices of a recipient
+### Self-Destruct Timer
+- Messages can be set to auto-expire (1 min / 5 min / 1 hr / 24 hr)
+- Server scheduler (`app/scheduler.py`) cleans up expired messages
+
+### Ephemeral Session Mode
+- Toggle in sidebar: current session messages held in JS memory only, never persisted to `localStorage`
 
 ---
 
-## 5. Architecture & Data Flow
+## Architecture
 
 ```
-┌─────────────────────────────────────────────────────────┐
-│                    CLIENT (Browser)                      │
-│                                                          │
-│  Web Crypto API (native — no JS library needed)          │
-│  ┌──────────┐  ┌──────────┐  ┌───────────────────────┐  │
-│  │ ECDSA    │  │ ECDH     │  │ AES-256-GCM + HMAC    │  │
-│  │ Identity │  │ Key Exch │  │ Message Encrypt/Dec    │  │
-│  └──────────┘  └──────────┘  └───────────────────────┘  │
-│       ↕               ↕               ↕                  │
-│  PBKDF2-encrypted localStorage    In-memory session keys  │
-└──────────────────────┬──────────────────────────────────┘
-                       │ HTTPS / WSS (ciphertext only)
-┌──────────────────────▼──────────────────────────────────┐
-│                   SERVER (Python/Flask)                   │
-│                                                          │
-│  Flask-SocketIO relay  │  REST API                        │
-│  ┌─────────────────────────────────────────────────────┐ │
-│  │  SQLite DB                                           │ │
-│  │  users (argon2id hash, public keys)                  │ │
-│  │  messages (encrypted_payloads — NO PLAINTEXT)        │ │
-│  │  chat_sessions (ephemeral public keys only)          │ │
-│  │  device_keys (public keys per device)                │ │
-│  └─────────────────────────────────────────────────────┘ │
-└─────────────────────────────────────────────────────────┘
+┌─────────────────────────────────────────────────────┐
+│                   BROWSER (Client)                   │
+│                                                      │
+│  Web Crypto API — no external crypto library         │
+│  ┌────────────┐  ┌────────────┐  ┌────────────────┐ │
+│  │ ECDSA P-384│  │ ECDH P-256 │  │ AES-256-GCM    │ │
+│  │ (identity) │  │(key exchange│  │ HMAC-SHA256    │ │
+│  └────────────┘  └────────────┘  └────────────────┘ │
+│        ↕                ↕                ↕           │
+│  PBKDF2-encrypted localStorage    RAM session keys   │
+└──────────────────────┬──────────────────────────────┘
+                       │ HTTPS / WSS  (ciphertext only)
+┌──────────────────────▼──────────────────────────────┐
+│              SERVER (FastAPI + python-socketio)       │
+│                                                      │
+│  SocketIO relay  │  REST API  │  Background scheduler│
+│  ┌──────────────────────────────────────────────┐   │
+│  │  Database (SQLite dev / PostgreSQL prod)      │   │
+│  │  users          — username, argon2id hash     │   │
+│  │  device_keys    — public keys per device      │   │
+│  │  messages       — encrypted_payloads only     │   │
+│  │  chat_sessions  — ephemeral public keys       │   │
+│  │  audit_logs     — events, no message content  │   │
+│  └──────────────────────────────────────────────┘   │
+└─────────────────────────────────────────────────────┘
 ```
 
-**DFD — Message Send:**
-1. Sender types message → `encryptMessage(aesKey, hmacKey, plaintext)` → `{ciphertext, nonce, hmac}`
-2. Payload POSTed over WSS to server → server stores ciphertext, relays to recipient's SocketIO room
-3. Recipient's browser receives ciphertext → `decryptMessage()` verifies HMAC, then AES-GCM decrypts → plaintext rendered
-
 ---
 
-## 6. Cryptographic Libraries
+## Cryptographic Primitives
 
-| Library | Purpose | Justification |
+| Primitive | Algorithm | Purpose |
 |---|---|---|
-| **Web Crypto API** (browser native) | ECDSA, ECDH, AES-GCM, HMAC, HKDF, PBKDF2 | Zero external dependency, FIPS 140-2 compliant, hardware-accelerated |
-| **argon2-cffi** (Python) | Server-side password hashing | Argon2id is the Password Hashing Competition winner; memory-hard, side-channel resistant |
-| **PyJWT** (Python) | Device session tokens | Industry-standard JWT with HS256 signing |
-| **Flask-SocketIO / eventlet** | Real-time WebSocket relay | Lightweight, production-grade async server |
+| Identity key | ECDSA P-384 | Sign ephemeral keys; key fingerprints |
+| Key exchange | ECDH P-256 | Establish shared secret without transmitting it |
+| Key derivation (session) | HKDF-SHA256 | Derive AES + HMAC keys from ECDH shared secret |
+| Message encryption | AES-256-GCM | Authenticated encryption of every message |
+| Message integrity | HMAC-SHA256 | Independent MAC over nonce ‖ ciphertext |
+| Key derivation (storage) | PBKDF2-SHA256, 310 000 iter | Derive AES key from user password for localStorage |
+| Password hashing (server) | Argon2id (64MB, t=3, p=4) | Slow hash for credential storage |
+| Session tokens | JWT HS256 | Stateless device authentication |
+
+All browser-side operations use the **native Web Crypto API** — zero external crypto library dependency, hardware-accelerated, FIPS 140-2 compliant.
 
 ---
 
-## 7. Security Audit Self-Assessment
+## Security Audit Self-Assessment
 
-| Attack | Status | Defense |
+| Attack Vector | Status | Defence |
 |---|---|---|
-| **Replay attack** | ✅ Mitigated | 12-byte random GCM nonce per message; replayed nonce causes GCM/HMAC failure |
-| **Bit-flipping** | ✅ Mitigated | AES-GCM is authenticated encryption; HMAC provides redundant check |
-| **Server-side compromise** | ✅ Mitigated | DB contains zero plaintext; only ciphertext blobs + public keys |
-| **MitM on key exchange** | ⚠️ Partial | Detectable via key fingerprint UI; requires user to verify fingerprint out-of-band |
-| **Password brute-force** | ✅ Mitigated | Argon2id (64MB RAM, 3 iterations) makes offline attacks expensive |
-| **Private key theft** | ✅ Mitigated | Private keys AES-encrypted in localStorage with PBKDF2-derived key |
-| **XSS key exfiltration** | ⚠️ Partial | CSP headers recommended in production; private keys in encrypted localStorage |
-| **Session hijacking** | ✅ Mitigated | Short-lived JWT per device; device revocation API; 2FA for new devices |
+| Replay attack | ✅ Mitigated | 96-bit random GCM nonce per message; HMAC covers nonce |
+| Bit-flipping | ✅ Mitigated | AES-GCM auth tag + independent HMAC both reject any mutation |
+| Server-side DB leak | ✅ Mitigated | Zero plaintext in DB — only ciphertext + public keys |
+| MitM on key exchange | ✅ Mitigated | ECDSA signatures on ephemeral keys verified before key derivation |
+| Passive traffic analysis | ✅ Mitigated | All traffic over HTTPS/WSS; message sizes padded by GCM overhead |
+| Password brute-force | ✅ Mitigated | Argon2id (64MB RAM, 3 iterations) — offline attack is memory-expensive |
+| Private key theft from browser | ✅ Mitigated | Private keys AES-encrypted at rest; plaintext only in RAM after unlock |
+| XSS key exfiltration | ⚠️ Partial | Strict CSP (`script-src 'self'`); keys in encrypted localStorage |
+| JWT forgery | ✅ Mitigated | HS256 signed with `JWT_SECRET_KEY` set as Railway env var |
 
 ---
 
-## 8. Setup & Installation
+## Setup
 
-### Prerequisites
+### Requirements
 - Python 3.11+
-- pip
 
-### Install
+### Install & run locally
 
 ```bash
-cd c:\Projects\secureIM
 python -m venv .venv
-.venv\Scripts\activate
+.venv\Scripts\activate        # Windows
+# source .venv/bin/activate   # macOS/Linux
 pip install -r requirements.txt
-```
-
-### Configure (optional)
-
-Create a `.env` file for production settings:
-
-```env
-SECRET_KEY=change-this-to-a-random-64-char-string
-JWT_SECRET_KEY=change-this-to-another-random-string
-BASE_URL=http://localhost:5000
-
-# Email (leave MAIL_SUPPRESS_SEND=true for dev — links print to console)
-MAIL_SUPPRESS_SEND=true
-MAIL_SERVER=smtp.gmail.com
-MAIL_PORT=587
-MAIL_USERNAME=your@gmail.com
-MAIL_PASSWORD=your-app-password
-MAIL_DEFAULT_SENDER=SecureIM <noreply@yourdomain.com>
-```
-
-### Run
-
-```bash
 python run.py
 ```
 
-Open **http://localhost:5000** in your browser.
+Open **http://localhost:8000**
 
-> **Development tip:** With `MAIL_SUPPRESS_SEND=true`, all email links are printed to the terminal console — no SMTP setup required.
+### Environment variables
 
-### Quick Start (Two-User Demo)
+```env
+# Required in production — generate with: python -c "import secrets; print(secrets.token_hex(32))"
+SECRET_KEY=<random-64-char-hex>
+JWT_SECRET_KEY=<random-64-char-hex>
 
-1. Open two browser tabs (or use a private/incognito window for the second user)
-2. Register two accounts in each tab
-3. Check the terminal for the email verification links — click them
-4. Log in with both accounts
-5. Search for the other user in the sidebar → click to start a DM
-6. Send messages — watch the 🔒 E2EE Active badge appear after key exchange
-7. Click "Verify Keys" to compare key fingerprints out-of-band
+# Database — leave unset for local SQLite, set for Railway PostgreSQL
+DATABASE_URL=postgresql://user:pass@host/db
+
+# Optional tuning
+KEY_ROTATION_THRESHOLD=100   # rotate session keys every N messages
+DEBUG=false
+PORT=8000
+```
+
+### Deploy to Railway
+
+The project includes [`railway.json`](railway.json). Push to GitHub → connect repo in Railway → add `SECRET_KEY`, `JWT_SECRET_KEY`, and a PostgreSQL plugin → deploy.
+
+### Quick demo (two users)
+
+1. Open two browser tabs (or one normal + one incognito)
+2. Register two accounts
+3. Log in with both accounts
+4. Click the other user in the sidebar → secure session establishes automatically
+5. Send messages — watch the `🔒 E2EE Active` badge appear after key exchange
+6. Click "Verify Keys" on the contact to compare ECDSA fingerprints out-of-band
 
 ---
 
-## 9. Project Structure
+## Project Structure
 
 ```
 secureIM/
 ├── app/
-│   ├── __init__.py       # Flask app factory
-│   ├── models.py         # SQLAlchemy models (User, DeviceKey, Message, Group…)
-│   ├── auth.py           # Auth routes (register, login, 2FA, email verify)
+│   ├── __init__.py       # FastAPI app factory + SocketIO ASGI wrapper
+│   ├── models.py         # SQLAlchemy ORM (User, DeviceKey, Message, ChatSession…)
+│   ├── auth.py           # Auth API (register, login, logout, device management)
 │   ├── chat.py           # Chat REST API + SocketIO event handlers
 │   ├── routes.py         # HTML page routes
-│   ├── crypto_utils.py   # Argon2id, JWT, token generation
-│   └── email_utils.py    # Email sending (Flask-Mail + console fallback)
+│   ├── crypto_utils.py   # Argon2id, JWT, secure token generation
+│   ├── security.py       # SecurityHeadersMiddleware (CSP, HSTS, etc.)
+│   ├── scheduler.py      # Background job: expire self-destruct messages
+│   ├── database.py       # SQLAlchemy engine + session factory
+│   ├── socket_manager.py # python-socketio server instance
+│   └── limiter.py        # slowapi rate limiter instance
 ├── static/
-│   ├── css/style.css     # Dark cyberpunk theme
+│   ├── css/style.css     # Dark theme UI
 │   └── js/
-│       ├── crypto.js     # Web Crypto API wrapper (all E2EE logic)
+│       ├── crypto.js     # All E2EE logic (Web Crypto API wrapper)
 │       ├── storage.js    # Encrypted localStorage management
-│       ├── auth.js       # Registration, login, 2FA UI
-│       └── chat.js       # Chat UI, SocketIO, E2EE orchestration
+│       ├── auth.js       # Registration + login UI
+│       ├── chat.js       # Chat UI, SocketIO client, E2EE orchestration
+│       └── socket.io.min.js
 ├── templates/
-│   ├── base.html         # Base layout
-│   ├── login.html        # Login + 2FA waiting
-│   ├── register.html     # Registration
-│   ├── chat.html         # Main chat interface
-│   ├── verify_email.html # Email activation landing
-│   └── device_authorized.html  # 2FA link landing
-├── config.py             # All configuration (reads from .env)
-├── run.py                # Application entry point
-├── requirements.txt      # Python dependencies
-└── README.md             # This file
+│   ├── base.html
+│   ├── login.html
+│   ├── register.html
+│   └── chat.html
+├── config.py             # Settings singleton (reads env vars)
+├── run.py                # Entry point (uvicorn)
+├── gunicorn.conf.py      # Gunicorn config for production
+├── railway.json          # Railway deployment config
+└── requirements.txt
 ```

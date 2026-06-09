@@ -68,7 +68,6 @@ function updateStrengthBar(password) {
 async function handleRegister(e) {
   e.preventDefault();
   const username = document.getElementById('reg-username').value.trim();
-  const email    = document.getElementById('reg-email').value.trim();
   const password = document.getElementById('reg-password').value;
   const confirm  = document.getElementById('reg-confirm').value;
 
@@ -102,12 +101,12 @@ async function handleRegister(e) {
 
     setStatus('reg-status', '📡 Registering with server…', 'info');
 
-    // 3. Send public keys + credentials to server
+    // 3. Send public keys + credentials to server (private keys never leave device)
     const res = await fetch(`${API}/register`, {
       method:  'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
-        username, email, password,
+        username, password,
         ecdsa_public_key: ecdsaPubJwk,
         ecdh_public_key:  ecdhPubJwk,
         device_id:        deviceId,

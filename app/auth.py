@@ -83,7 +83,6 @@ def _audit(db: Session, event_type: str, request: Request,
 
 class RegisterBody(BaseModel):
     username:         str
-    email:            str
     password:         str
     ecdsa_public_key: str
     ecdh_public_key:  str
@@ -109,37 +108,35 @@ class SettingsBody(BaseModel):
 
 @router.post('/register', status_code=201)
 @limiter.limit('5/hour')
-def register(request: Request, body: RegisterBody, db: Session = Depends(get_db)):
-    username         = body.username.strip().lower()
-    email            = body.email.strip().lower()
-    password         = body.password
-    ecdsa_public_key = body.ecdsa_public_key
-    ecdh_public_key  = body.ecdh_public_key
-    device_id        = body.device_id
-    device_name      = body.device_name or 'Browser'
+def register(request: Request, body: RegisterBody,
+             db: Session = Depends(get_db)):
+    username = body.username.strip().lower()
+    password = body.password
+    device_id = body.device_id
+    device_name = body.device_name or 'Browser'
 
     if len(username) < 3 or len(username) > 30:
-        raise HTTPException(status_code=400, detail='Username must be 3–30 characters')
+        raise HTTPException(
+            status_code=400, detail='Username must be 3–30 characters')
     if len(password) < 8:
-        raise HTTPException(status_code=400, detail='Password must be at least 8 characters')
+        raise HTTPException(
+            status_code=400, detail='Password must be at least 8 characters')
     if db.query(User).filter_by(username=username).first():
         raise HTTPException(status_code=409, detail='Username already taken')
-    if db.query(User).filter_by(email=email).first():
-        raise HTTPException(status_code=409, detail='Email already registered')
 
     user = User(
         username=username,
-        email=email,
         password_hash=hash_password(password),
     )
     db.add(user)
     db.flush()
 
+    # Register the device and store only public keys — private keys stay on device
     device = DeviceKey(
         user_id=user.id,
         device_id=device_id,
-        ecdsa_public_key=ecdsa_public_key,
-        ecdh_public_key=ecdh_public_key,
+        ecdsa_public_key=body.ecdsa_public_key,
+        ecdh_public_key=body.ecdh_public_key,
         device_name=device_name,
         is_active=True,
     )
@@ -151,9 +148,9 @@ def register(request: Request, body: RegisterBody, db: Session = Depends(get_db)
            detail={'username': username})
 
     return {
-        'status':  'ok',
-        'token':   token,
-        'user':    user.to_dict(),
+        'status': 'ok',
+        'token': token,
+        'user': user.to_dict(),
         'message': 'Account created — welcome to SecureIM!',
     }
 

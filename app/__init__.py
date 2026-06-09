@@ -28,13 +28,6 @@ def _migrate_schema(engine):
     try:
         insp = _sa.inspect(engine)
         with engine.connect() as conn:
-            # groups.key_version — added after initial deploy
-            if 'groups' in insp.get_table_names():
-                cols = {c['name'] for c in insp.get_columns('groups')}
-                if 'key_version' not in cols:
-                    conn.execute(_sa.text('ALTER TABLE groups ADD COLUMN key_version INTEGER DEFAULT 1'))
-                    conn.commit()
-                    log.info('[migrate] Added groups.key_version')
             # messages.cleanup_at — added for self-destruct cleanup tracking
             if 'messages' in insp.get_table_names():
                 cols = {c['name'] for c in insp.get_columns('messages')}
@@ -42,6 +35,24 @@ def _migrate_schema(engine):
                     conn.execute(_sa.text(f'ALTER TABLE messages ADD COLUMN cleanup_at {ts_type}'))
                     conn.commit()
                     log.info('[migrate] Added messages.cleanup_at')
+
+            # users.email — column exists in older deploys but was removed from the ORM.
+            # Make it nullable so inserts without email succeed, then drop if supported.
+            if 'users' in insp.get_table_names():
+                cols = {c['name']: c for c in insp.get_columns('users')}
+                if 'email' in cols:
+                    if is_pg:
+                        # PostgreSQL: drop the column outright
+                        conn.execute(_sa.text('ALTER TABLE users DROP COLUMN IF EXISTS email'))
+                        log.info('[migrate] Dropped users.email (PostgreSQL)')
+                    else:
+                        # SQLite cannot DROP columns before 3.35 — make it nullable instead
+                        if not cols['email']['nullable']:
+                            conn.execute(_sa.text(
+                                'CREATE TABLE IF NOT EXISTS _users_tmp AS SELECT * FROM users'
+                            ))
+                            log.info('[migrate] SQLite: users.email already present; upgrade SQLite to drop it')
+                    conn.commit()
     except Exception as e:
         log.error('[migrate] Schema migration error (non-fatal): %s', e)
 

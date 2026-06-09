@@ -140,7 +140,6 @@ async def connect(sid, environ, auth):
         missed = db.query(Message).filter(
             Message.recipient_id == user.id,
             Message.is_deep_deleted == False,  # noqa: E712
-            Message.group_id == None,          # noqa: E711  DM only
             Message.delivered_at == None,      # noqa: E711  not yet delivered
         ).order_by(Message.timestamp.asc()).limit(200).all()
 
@@ -372,7 +371,6 @@ def get_dm_history(
     current_user, _ = auth
     limit = min(limit, 100)
     q = db.query(Message).filter(
-        Message.group_id == None,  # noqa: E711
         or_(
             and_(Message.sender_id == current_user.id, Message.recipient_id == contact_id),
             and_(Message.sender_id == contact_id,      Message.recipient_id == current_user.id),

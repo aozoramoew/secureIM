@@ -125,7 +125,7 @@ function connectSocket(token) {
 
 // ── ECDH Session Management ───────────────────────────────────────
 
-async function initiateSession(recipientId) {
+async function initiateSession(recipientId, recipientUsername) {
   const ephemeral = await SecureCrypto.generateEphemeralKeyPair();
   const ephPubJwk = await SecureCrypto.exportKeyJWK(ephemeral.publicKey);
 
@@ -143,23 +143,37 @@ async function initiateSession(recipientId) {
   });
   const { session } = await res.json();
   SecureStorage.storeSessionKeys(session.id, null, null, ephemeral.privateKey);
+
+  // Track which session belongs to which contact so onSessionReady can verify
+  // the responder's signature even when they complete the handshake while
+  // this conversation is not the active one.
+  if (recipientUsername) {
+    const contacts = SecureStorage.getContacts();
+    const updated = contacts.map(c =>
+      c.id === recipientId ? { ...c, _pendingSessionId: session.id } : c
+    );
+    SecureStorage.saveContacts(updated);
+  }
+
   return session;
 }
 
 async function onSessionRequest(data) {
-  const { session_id, initiator_id, initiator, ephemeral_pub_a, ephemeral_sig_a } = data;
+  const { session_id, initiator_id, initiator, initiator_device_id, ephemeral_pub_a, ephemeral_sig_a } = data;
 
   // ── Step 1: Verify initiator's ECDSA signature BEFORE key exchange ──
-  // Fetch their registered public key. A MitM substituting ephemeral_pub_a
-  // cannot forge ephemeral_sig_a without the initiator's ECDSA private key
-  // (which never leaves their device). This fully prevents MitM on ECDH.
   const keysRes = await apiGet(`${CHAT_API}/users/${initiator}/keys`);
   if (!keysRes.ok) { showAlert('❌ Could not fetch sender public key', 'error'); return; }
   const { devices } = await keysRes.json();
   if (!devices.length) { showAlert('❌ No device keys found for sender', 'error'); return; }
 
+  // Match the exact device that signed the ephemeral key; fall back to most recent.
+  const signingDevice = initiator_device_id
+    ? (devices.find(d => d.device_id === initiator_device_id) || devices[0])
+    : devices[0];
+
   const isValid = await SecureCrypto.verifySignature(
-    devices[0].ecdsa_public_key, ephemeral_pub_a, ephemeral_sig_a
+    signingDevice.ecdsa_public_key, ephemeral_pub_a, ephemeral_sig_a
   );
   if (!isValid) {
     showAlert('⛔ KEY EXCHANGE SIGNATURE INVALID — Possible MitM attack! Session aborted.', 'error');
@@ -191,10 +205,20 @@ async function onSessionReady(data) {
   if (!stored || !stored.myEphemeral) return;
 
   // ── Verify Bob's ephemeral key signature BEFORE computing shared secret ──
-  // We need Bob's username to fetch his ECDSA public key.
-  // Use the active conversation's username.
-  if (activeConversation?.username && ephemeral_sig_b) {
-    const keysRes = await apiGet(`${CHAT_API}/users/${activeConversation.username}/keys`);
+  // Resolve the responder's username: use active conversation if it matches,
+  // otherwise look up from the contacts list (handles background reconnect).
+  const isThisSession = activeConversation?.sessionId === session_id;
+  let responderUsername = isThisSession ? activeConversation?.username : null;
+
+  if (!responderUsername) {
+    // Find the contact whose session_id matches by checking stored contacts
+    const contacts = SecureStorage.getContacts();
+    const match = contacts.find(c => c._pendingSessionId === session_id);
+    if (match) responderUsername = match.username;
+  }
+
+  if (responderUsername && ephemeral_sig_b) {
+    const keysRes = await apiGet(`${CHAT_API}/users/${responderUsername}/keys`);
     if (keysRes.ok) {
       const { devices } = await keysRes.json();
       if (devices.length) {
@@ -205,7 +229,7 @@ async function onSessionReady(data) {
           showAlert('⛔ KEY EXCHANGE SIGNATURE INVALID — MitM attack detected! Aborting session.', 'error');
           console.error('[SecureIM] MitM detected: session_ready signature verification failed');
           SecureStorage.clearSessionKeys(session_id);
-          updateEncryptionBadge(false);
+          if (isThisSession) updateEncryptionBadge(false);
           return;  // ABORT
         }
       }
@@ -216,8 +240,10 @@ async function onSessionReady(data) {
   const hmacKey = await SecureCrypto.deriveHMACKey(stored.myEphemeral, ephemeral_pub_b);
   SecureStorage.storeSessionKeys(session_id, aesKey, hmacKey, stored.myEphemeral);
 
-  showAlert('🔒 Secure session established with ' + (activeConversation?.name || ''), 'success');
-  updateEncryptionBadge(true);
+  if (isThisSession) {
+    showAlert('🔒 Secure session established with ' + activeConversation.name, 'success');
+    updateEncryptionBadge(true);
+  }
 }
 
 async function onKeyRotationRequired(data) {
@@ -225,7 +251,7 @@ async function onKeyRotationRequired(data) {
   showAlert('🔄 Key rotation triggered — refreshing session keys for forward secrecy…', 'info');
   SecureStorage.clearSessionKeys(session_id);
   if (activeConversation?.sessionId === session_id) {
-    const sess = await initiateSession(activeConversation.id);
+    const sess = await initiateSession(activeConversation.id, activeConversation.username);
     activeConversation.sessionId = sess.id;
   }
 }
@@ -457,7 +483,7 @@ async function openDM(userId, username) {
   clearUnreadBadge(userId);
 
   // Start ECDH session
-  const sess = await initiateSession(userId);
+  const sess = await initiateSession(userId, username);
   if (!sess) return;
   activeConversation.sessionId = sess.id;
 

@@ -90,6 +90,33 @@ async def connect(sid, environ, auth):
     await sio.enter_room(sid, f'user_{user.id}')
     await sio.emit('user_online', {'user_id': user.id, 'username': user.username})
 
+    # Replay any pending session requests that arrived while this user was offline.
+    # A session is "pending" if user_b has not yet responded (ephemeral_pub_b is null).
+    db = SessionLocal()
+    try:
+        pending = db.query(ChatSession).filter(
+            ChatSession.user_b_id == user.id,
+            ChatSession.is_active == True,  # noqa: E712
+            ChatSession.ephemeral_pub_b == None,  # noqa: E711
+        ).all()
+        for sess in pending:
+            initiator = db.get(User, sess.user_a_id)
+            if not initiator:
+                continue
+            initiator_device = db.query(DeviceKey).filter_by(
+                user_id=initiator.id, is_active=True
+            ).order_by(DeviceKey.last_seen.desc()).first()
+            await sio.emit('session_request', {
+                'session_id':      sess.id,
+                'initiator_id':    initiator.id,
+                'initiator':       initiator.username,
+                'initiator_device_id': initiator_device.device_id if initiator_device else None,
+                'ephemeral_pub_a': sess.ephemeral_pub_a,
+                'ephemeral_sig_a': sess.ephemeral_sig_a,
+            }, room=sid)
+    finally:
+        db.close()
+
 
 @sio.event
 async def disconnect(sid):
@@ -388,10 +415,14 @@ async def create_session(
     db.add(session)
     db.commit()
 
+    initiator_device = db.query(DeviceKey).filter_by(
+        user_id=current_user.id, is_active=True
+    ).order_by(DeviceKey.last_seen.desc()).first()
     await _emit_to_user(body.recipient_id, 'session_request', {
         'session_id':      session.id,
         'initiator_id':    current_user.id,
         'initiator':       current_user.username,
+        'initiator_device_id': initiator_device.device_id if initiator_device else None,
         'ephemeral_pub_a': body.ephemeral_pub,
         'ephemeral_sig_a': body.ephemeral_sig,
     })

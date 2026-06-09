@@ -572,10 +572,10 @@ async def delete_group(
 ):
     current_user, _ = auth
     member = db.query(GroupMember).filter_by(
-        group_id=group_id, user_id=current_user.id, is_admin=True
+        group_id=group_id, user_id=current_user.id
     ).first()
     if not member:
-        raise HTTPException(status_code=403, detail='Only group admin can delete')
+        raise HTTPException(status_code=403, detail='You are not a member of this group')
 
     group = db.get(Group, group_id)
     if not group:

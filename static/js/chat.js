@@ -18,8 +18,11 @@ let _pendingOutgoing = [];
 const _userMap = {};
 
 // Device key cache: username → [{device_id, ecdh_public_key, ...}]
-// Avoids repeated API calls during message send. Cleared on page load only.
 const _deviceKeyCache = {};
+
+// Set of user_ids currently known to be offline — cleared when they come back online.
+// Used to decide offline vs ephemeral path without clearing session keys from RAM.
+const _offlineUsers = new Set();
 
 // ── Bootstrap ────────────────────────────────────────────────────
 
@@ -113,13 +116,9 @@ function connectSocket(token) {
 
   socket.on('user_online', d => {
     updateUserStatus(d.user_id, true);
-    // If we have an active DM with this user and no session keys yet,
-    // re-initiate now that they're online (session_request may have been lost).
-    if (
-      activeConversation?.type === 'dm' &&
-      activeConversation.id === d.user_id &&
-      activeConversation.sessionId
-    ) {
+    _offlineUsers.delete(d.user_id);
+    // Re-initiate session if active DM has no usable keys
+    if (activeConversation?.type === 'dm' && activeConversation.id === d.user_id) {
       const keys = SecureStorage.getSessionKeys(activeConversation.sessionId);
       if (!keys?.aesKey) {
         initiateSession(activeConversation.id, activeConversation.username).then(sess => {
@@ -130,16 +129,11 @@ function connectSocket(token) {
   });
   socket.on('user_offline', d => {
     updateUserStatus(d.user_id, false);
-    // Invalidate session keys for this user — they went offline, their ephemeral keys
-    // are gone. Next message must use offline path or wait for new handshake.
+    // Mark the peer as offline so next outgoing message uses the offline path.
+    // Do NOT clear session keys — in-flight echo messages still need them to decrypt.
+    _offlineUsers.add(d.user_id);
     if (activeConversation?.type === 'dm' && activeConversation.id === d.user_id) {
-      if (activeConversation.sessionId) {
-        SecureStorage.clearSessionKeys(activeConversation.sessionId);
-      }
-      // Also clear device key cache so we re-fetch on next send
-      if (activeConversation.username) {
-        delete _deviceKeyCache[activeConversation.username];
-      }
+      if (activeConversation.username) delete _deviceKeyCache[activeConversation.username];
       updateEncryptionBadge(false);
     }
   });
@@ -418,14 +412,13 @@ async function sendMessage() {
   input.focus();
 
   const sessionKeys = SecureStorage.getSessionKeys(activeConversation.sessionId);
-  // Allow sending even without an established ephemeral session (recipient offline).
-  // In that case we fall back to encrypting per-device using the recipient's static
-  // ECDH public key (registered on the server at login/register time). This is
-  // analogous to a Signal "prekey message" — the recipient decrypts with their
-  // static ECDH private key when they come back online.
-  const hasEphemeralSession = !!(sessionKeys?.aesKey);
+  // Use ephemeral session key only when: key exists in RAM AND peer is not marked offline.
+  // Keeping keys in RAM after peer goes offline lets us decrypt our own echoes,
+  // but we must not encrypt new outgoing messages with a key the peer no longer holds.
+  const peerOffline = activeConversation.type === 'dm' && _offlineUsers.has(activeConversation.id);
+  const hasEphemeralSession = !!(sessionKeys?.aesKey) && !peerOffline;
 
-  if (!hasEphemeralSession && activeConversation.type === 'dm') {
+  if (peerOffline && activeConversation.type === 'dm') {
     showAlert('📨 Recipient is offline — message will be delivered when they reconnect.', 'info');
   }
 

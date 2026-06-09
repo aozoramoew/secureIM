@@ -584,37 +584,35 @@ async function _sendMessageInner() {
 // ── Receive Message ───────────────────────────────────────────────
 
 async function onReceiveMessage(msg) {
-  const isForActiveConversation =
-    (activeConversation?.type === 'dm'    && (msg.sender_id === activeConversation.id || msg.sender_id === currentUser.id)) ||
-    (activeConversation?.type === 'group' && msg.group_id   === activeConversation.id);
+  // Compute the canonical conversation id for this message — used for
+  // storage, badge updates, and reconciliation. Must be consistent with
+  // getActiveConvId() and _convIdForMessage().
+  const convId = _convIdForMessage(msg);
+  const isMine = msg.sender_id === currentUser.id;
 
-  const deviceId = SecureStorage.getDeviceId();
-  const payloads = msg.encrypted_payloads || {};
+  // A message belongs to the active conversation only when its convId matches.
+  const isForActiveConversation = convId === getActiveConvId();
+
+  // ── Decrypt ──────────────────────────────────────────────────────
+  const deviceId  = SecureStorage.getDeviceId();
+  const payloads  = msg.encrypted_payloads || {};
   const myPayload = payloads[deviceId] || payloads['group'];
 
   let plaintext = null;
-  let mediaObj = {};
-
-  const sessionId = msg.session_id || activeConversation?.sessionId;
+  let mediaObj  = {};
 
   if (myPayload) {
     try {
       let aesKey, hmacKey;
 
       if (myPayload.offline_delivery && myPayload.sender_eph_pub) {
-        // Message was sent while we were offline — sender used our static ECDH public key.
-        // Derive the same session key using our static ECDH private key + sender's ephemeral pub.
         aesKey  = await SecureCrypto.deriveSessionKey(myEcdhPrivKey, myPayload.sender_eph_pub);
         hmacKey = await SecureCrypto.deriveHMACKey(myEcdhPrivKey, myPayload.sender_eph_pub);
       } else {
-        // Normal path: use the established ephemeral session key from memory.
+        // Use session key for this specific conversation — not activeConversation
+        const sessionId = msg.session_id || (isForActiveConversation ? activeConversation?.sessionId : null);
         const keys = SecureStorage.getSessionKeys(sessionId);
-        if (!keys?.aesKey) {
-          // Session key not in memory (e.g. page refresh) — cannot decrypt yet.
-          // The message is saved to storage as-is; it will be re-decrypted once
-          // the session is re-established.
-          plaintext = null;
-        } else {
+        if (keys?.aesKey) {
           aesKey  = keys.aesKey;
           hmacKey = keys.hmacKey;
         }
@@ -639,31 +637,34 @@ async function onReceiveMessage(msg) {
         }
       }
     } catch (e) {
-      plaintext = '⚠️ [HMAC verification failed — message may be tampered]';
+      plaintext = '🔒 [Encrypted]';
     }
   }
 
   const enriched = { ...msg, ...mediaObj };
   if (!mediaObj.content_type) enriched.plaintext = plaintext;
 
-  const convId = _convIdForMessage(msg);
-
-  if (isForActiveConversation && msg.sender_id !== currentUser.id) {
+  // ── Render / reconcile ───────────────────────────────────────────
+  if (isMine) {
+    // Echo of our own outgoing message — update the optimistic bubble
+    // ONLY if it belongs to the currently displayed conversation.
+    if (isForActiveConversation) {
+      _reconcileOutgoing(convId, enriched);
+    } else {
+      // Echo for a background conversation — no bubble to update.
+      // Drop from pending queue so it doesn't block future reconciliations.
+      _pendingOutgoing = _pendingOutgoing.filter(p => p.convId !== convId
+        || document.getElementById(`msg-${p.tempId}`));
+    }
+  } else if (isForActiveConversation) {
     renderMessage(enriched, false);
-  } else if (msg.sender_id === currentUser.id) {
-    // This is the server's echo of our own message — flip its optimistic
-    // "sending" indicator to a real delivery receipt.
-    _reconcileOutgoing(convId, msg);
+  } else {
+    updateUnreadBadge(msg.group_id || msg.sender_id);
   }
 
-  // Always save received messages to local storage, even if inactive
+  // ── Persist ──────────────────────────────────────────────────────
   if (currentPassword) {
     await SecureStorage.saveMessage(currentPassword, convId, enriched);
-  }
-
-  // Update sidebar unread badge
-  if (!isForActiveConversation && msg.sender_id !== currentUser.id) {
-    updateUnreadBadge(msg.group_id || msg.sender_id);
   }
 }
 
@@ -1265,29 +1266,23 @@ function _convIdForMessage(msg) {
  * "sending" indicator to a delivered/read receipt.
  */
 function _reconcileOutgoing(convId, msg) {
-  // Drop stale entries whose DOM bubble was removed (conversation switch etc.)
-  _pendingOutgoing = _pendingOutgoing.filter(p => document.getElementById(`msg-${p.tempId}`));
+  // Remove entries whose bubble no longer exists in the DOM
+  _pendingOutgoing = _pendingOutgoing.filter(
+    p => document.getElementById(`msg-${p.tempId}`)
+  );
 
-  // Try to match by plaintext first (avoids mis-ordering when messages arrive out of sequence)
-  const incomingText = msg.encrypted_payloads ? null : (msg.plaintext || null);
-  let idx = -1;
-  if (incomingText) {
-    idx = _pendingOutgoing.findIndex(p => {
-      if (p.convId !== convId) return false;
-      const el = document.getElementById(`msg-${p.tempId}`);
-      return el?.querySelector('.msg-body')?.textContent === incomingText;
-    });
-  }
-  // Fallback: oldest pending for this conversation
-  if (idx === -1) idx = _pendingOutgoing.findIndex(p => p.convId === convId);
+  // Take the oldest pending bubble for this conversation (FIFO)
+  const idx = _pendingOutgoing.findIndex(p => p.convId === convId);
   if (idx === -1) return;
-
   const { tempId } = _pendingOutgoing.splice(idx, 1)[0];
+
   const el = document.getElementById(`msg-${tempId}`);
   if (!el) return;
-  // Guard: don't overwrite if another echo already claimed this id
-  if (document.getElementById(`msg-${msg.id}`) && msg.id !== tempId) return;
-  el.id = `msg-${msg.id}`;
+
+  // Avoid stealing an id already claimed by a previous echo
+  if (msg.id && document.getElementById(`msg-${msg.id}`)) return;
+
+  if (msg.id) el.id = `msg-${msg.id}`;
 
   const receipt = el.querySelector('.msg-receipt');
   if (receipt) {

@@ -10,5 +10,8 @@ sio = socketio.AsyncServer(
     cors_allowed_origins='*',
     logger=False,
     engineio_logger=False,
-    max_http_buffer_size=10 * 1024 * 1024,  # 10 MB for encrypted image payloads
+    # 25 MB: encrypted_payloads is base64 ciphertext (~1.37x)
+    # duplicated per recipient/sender device, so a 2 MB attachment
+    # can need ~10MB+ across several devices.
+    max_http_buffer_size=25 * 1024 * 1024,
 )

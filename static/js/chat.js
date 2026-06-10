@@ -1367,8 +1367,8 @@ document.addEventListener('DOMContentLoaded', () => {
         fileInput.value = '';
         return;
       }
-      if (file.size > 5 * 1024 * 1024) {
-        showAlert('⚠️ File too large. Max 5MB allowed.', 'warning');
+      if (file.size > 2 * 1024 * 1024) {
+        showAlert('⚠️ File too large. Max 2MB allowed.', 'warning');
         fileInput.value = '';
         return;
       }

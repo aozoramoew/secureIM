@@ -182,14 +182,36 @@ const SecureStorage = (() => {
     await appendToHistory(password, conversationId, message);
   }
 
+  // Strip large binary payloads before persisting — base64 media (images,
+  // files) would blow past the localStorage quota (~5-10MB) after just a
+  // couple of attachments. Media stays available for the current session
+  // via _sessionMessages; on reload, history shows the file/caption without
+  // the inline preview.
+  function _stripMediaForStorage(message) {
+    if (message.content_type !== 'media') return message;
+    const { mediaData, mediaUrl, ...rest } = message;
+    return rest;
+  }
+
   async function appendToHistory(password, conversationId, message) {
     const existing = await loadHistory(password, conversationId);
-    existing.push(message);
+    existing.push(_stripMediaForStorage(message));
     const trimmed = existing.slice(-500);
     const key = historyKey(conversationId);
     const salt = _getSalt();
     const encrypted = await SecureCrypto.encryptForStorage(password, trimmed, salt);
-    localStorage.setItem(key, JSON.stringify(encrypted));
+    try {
+      localStorage.setItem(key, JSON.stringify(encrypted));
+    } catch (e) {
+      // Quota exceeded — drop oldest half of history and retry once.
+      const reduced = trimmed.slice(Math.floor(trimmed.length / 2));
+      const encryptedReduced = await SecureCrypto.encryptForStorage(password, reduced, salt);
+      try {
+        localStorage.setItem(key, JSON.stringify(encryptedReduced));
+      } catch (e2) {
+        console.error('[storage] failed to persist history after trim:', e2);
+      }
+    }
   }
 
   async function loadHistory(password, conversationId) {

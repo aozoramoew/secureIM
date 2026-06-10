@@ -832,6 +832,25 @@ function buildMessageEl(msg, isMine) {
         fileBox.append(icon, info);
         bubble.appendChild(fileBox);
       }
+    } else {
+      // Media not persisted to localStorage (quota) and lost after reload —
+      // show a placeholder with whatever metadata we still have.
+      const placeholder = document.createElement('div');
+      placeholder.className = 'msg-file';
+      const icon = document.createElement('span');
+      icon.className = 'msg-file-icon';
+      icon.textContent = msg.mediaType === 'image' ? '🖼️' : msg.mediaType === 'video' ? '🎞️' : '📎';
+      const info = document.createElement('span');
+      info.className = 'msg-file-info';
+      const name = document.createElement('span');
+      name.className = 'msg-file-name';
+      name.textContent = msg.fileName || 'Attachment';
+      const note = document.createElement('span');
+      note.className = 'msg-file-size';
+      note.textContent = 'Unavailable after reload';
+      info.append(name, note);
+      placeholder.append(icon, info);
+      bubble.appendChild(placeholder);
     }
   }
 

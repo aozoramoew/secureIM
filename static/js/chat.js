@@ -731,9 +731,7 @@ function buildMessageEl(msg, isMine) {
   div.id        = `msg-${msg.id}`;
   div.className = `message ${isMine ? 'mine' : 'theirs'}`;
 
-  // Append Z so the browser treats the server's UTC timestamp as UTC, not local time
-  const tsStr = msg.timestamp?.endsWith('Z') ? msg.timestamp : msg.timestamp + 'Z';
-  const time = new Date(tsStr).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+  const time = new Date(_asUTC(msg.timestamp)).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
 
   if (msg.is_deep_deleted) {
     const body = document.createElement('div');
@@ -817,7 +815,7 @@ function buildMessageEl(msg, isMine) {
   if (msg.expires_at) {
     const timerEl = document.createElement('div');
     timerEl.className = 'msg-timer';
-    const expiresMs = new Date(msg.expires_at).getTime();
+    const expiresMs = new Date(_asUTC(msg.expires_at)).getTime();
     const updateTimer = () => {
       const remaining = Math.max(0, Math.floor((expiresMs - Date.now()) / 1000));
       if (remaining === 0) { timerEl.textContent = '⏱️ Expired'; return; }
@@ -869,7 +867,7 @@ function buildMessageEl(msg, isMine) {
 
 /** Build a "Today" / "Wednesday, Jun 3" separator shown between days in the thread. */
 function buildDateSepEl(timestamp) {
-  const d = new Date(timestamp), now = new Date();
+  const d = new Date(_asUTC(timestamp)), now = new Date();
   const label = d.toDateString() === now.toDateString()
     ? 'Today'
     : d.toLocaleDateString([], { weekday: 'long', month: 'short', day: 'numeric' });
@@ -883,7 +881,7 @@ function buildDateSepEl(timestamp) {
 
 function renderMessage(msg, isMine) {
   const container = document.getElementById('messages-container');
-  const day = new Date(msg.timestamp).toDateString();
+  const day = new Date(_asUTC(msg.timestamp)).toDateString();
   if (container.dataset.lastDate !== day) {
     container.appendChild(buildDateSepEl(msg.timestamp));
     container.dataset.lastDate = day;
@@ -900,6 +898,15 @@ function showDeleteMenu(msgId) {
 function clearMessages() {
   const c = document.getElementById('messages-container');
   if (c) { c.innerHTML = ''; delete c.dataset.lastDate; }
+}
+
+// Server sends naive UTC ISO timestamps (no trailing 'Z'). Append it so the
+// browser's Date parser treats the value as UTC instead of local time —
+// otherwise message times, date separators, and countdowns shift by the
+// local UTC offset.
+function _asUTC(isoStr) {
+  if (!isoStr) return isoStr;
+  return isoStr.endsWith('Z') || /[+-]\d{2}:\d{2}$/.test(isoStr) ? isoStr : isoStr + 'Z';
 }
 
 function escapeHtml(s) {

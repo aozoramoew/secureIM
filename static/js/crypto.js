@@ -325,9 +325,12 @@ const SecureCrypto = (() => {
     const metaBytes = plaintextBytes.subarray(4, 4 + metaLen);
     const metadata = JSON.parse(u8ToStr(metaBytes));
     
-    // Extract file bytes
-    const fileBytes = plaintextBytes.subarray(4 + metaLen);
-    
+    // Extract file bytes. subarray() is a view into the same underlying
+    // buffer as plaintextBytes — .buffer would return the WHOLE buffer
+    // (including the 4-byte length header and metadata JSON), corrupting
+    // the file. Copy out just the file's bytes instead.
+    const fileBytes = plaintextBytes.slice(4 + metaLen);
+
     return {
       metadata,
       fileBuffer: fileBytes.buffer

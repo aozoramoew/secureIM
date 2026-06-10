@@ -3,9 +3,10 @@ Background scheduler — runs cleanup jobs independent of web requests.
 Converted from Flask context to pure SQLAlchemy session.
 
 Jobs:
-  1. cleanup_expired_messages — runs every 5 minutes.
+  1. cleanup_expired_messages — runs every 30 seconds.
      Wipes encrypted_payloads from messages where expires_at <= now.
      Emits 'message_deleted' SocketIO event to live clients.
+     (30s keeps the shortest self-destruct option, 1 minute, reasonably tight.)
 """
 import logging
 from datetime import datetime
@@ -70,9 +71,9 @@ def start_scheduler():
         return
     _scheduler.add_job(
         func=_cleanup_expired_messages,
-        trigger=IntervalTrigger(minutes=5),
+        trigger=IntervalTrigger(seconds=30),
         id='cleanup_expired',
         replace_existing=True,
     )
     _scheduler.start()
-    log.info('[Scheduler] Started — self-destruct check runs every 5 minutes')
+    log.info('[Scheduler] Started — self-destruct check runs every 30 seconds')

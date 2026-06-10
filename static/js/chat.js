@@ -752,6 +752,21 @@ async function openDM(userId, username) {
   // Load stored history
   const convId = `dm_${Math.min(currentUser.id, userId)}_${Math.max(currentUser.id, userId)}`;
   const history = await SecureStorage.getConversation(currentPassword, convId);
+
+  // Self-destruct messages whose timer already elapsed (e.g. while this
+  // client was offline/reloading, before the server's 5-minute sweep ran)
+  // are shown as expired and stripped from local storage immediately,
+  // instead of waiting for the server's 'message_deleted' broadcast.
+  const now = Date.now();
+  for (const m of history) {
+    if (!m.is_deep_deleted && m.expires_at && new Date(_asUTC(m.expires_at)).getTime() <= now) {
+      m.is_deep_deleted = true;
+      m.plaintext = null;
+      m.expires_at = null;
+      if (currentPassword) await SecureStorage.markDeepDeleted(currentPassword, convId, m.id);
+    }
+  }
+
   history.forEach(m => renderMessage(m, m.sender_id === currentUser.id));
 
   // Mark all unread messages from this contact as read

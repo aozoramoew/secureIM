@@ -19,7 +19,6 @@ connection; the SocketIO client is given the token value once on connect.
 """
 import json
 import logging
-import secrets
 from datetime import datetime
 from typing import Optional
 from config import settings

@@ -16,47 +16,7 @@ from slowapi.errors import RateLimitExceeded
 
 from app.socket_manager import sio
 
-_static_dir    = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), 'static')
-_templates_dir = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), 'templates')
-
-
-def _migrate_schema(engine):
-    """Add any columns that may be missing from tables created before schema updates."""
-    import logging
-    import sqlalchemy as _sa
-    log = logging.getLogger(__name__)
-    is_pg = 'postgresql' in str(engine.url)
-    ts_type = 'TIMESTAMP' if is_pg else 'DATETIME'
-    try:
-        insp = _sa.inspect(engine)
-        with engine.connect() as conn:
-            # messages.cleanup_at — added for self-destruct cleanup tracking
-            if 'messages' in insp.get_table_names():
-                cols = {c['name'] for c in insp.get_columns('messages')}
-                if 'cleanup_at' not in cols:
-                    conn.execute(_sa.text(f'ALTER TABLE messages ADD COLUMN cleanup_at {ts_type}'))
-                    conn.commit()
-                    log.info('[migrate] Added messages.cleanup_at')
-
-            # users.email — column exists in older deploys but was removed from the ORM.
-            # Make it nullable so inserts without email succeed, then drop if supported.
-            if 'users' in insp.get_table_names():
-                cols = {c['name']: c for c in insp.get_columns('users')}
-                if 'email' in cols:
-                    if is_pg:
-                        # PostgreSQL: drop the column outright
-                        conn.execute(_sa.text('ALTER TABLE users DROP COLUMN IF EXISTS email'))
-                        log.info('[migrate] Dropped users.email (PostgreSQL)')
-                    else:
-                        # SQLite cannot DROP columns before 3.35 — make it nullable instead
-                        if not cols['email']['nullable']:
-                            conn.execute(_sa.text(
-                                'CREATE TABLE IF NOT EXISTS _users_tmp AS SELECT * FROM users'
-                            ))
-                            log.info('[migrate] SQLite: users.email already present; upgrade SQLite to drop it')
-                    conn.commit()
-    except Exception as e:
-        log.error('[migrate] Schema migration error (non-fatal): %s', e)
+_static_dir = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), 'static')
 
 
 def create_app():
@@ -64,7 +24,6 @@ def create_app():
     from app.database import engine, Base
     import app.models  # registers all ORM classes  # noqa: F401
     Base.metadata.create_all(bind=engine)
-    _migrate_schema(engine)
 
     # ── FastAPI app ────────────────────────────────────────────────
     app = FastAPI(

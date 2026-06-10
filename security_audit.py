@@ -2,7 +2,6 @@
 """
 SecureIM — Security Audit Script
 =================================
-Kiểm tra toàn bộ yêu cầu bảo mật theo đề bài:
   ✓ E2EE (server không thấy plaintext)
   ✓ ECDH Key Exchange (ephemeral keys)
   ✓ HMAC / Data Integrity
@@ -15,14 +14,9 @@ Kiểm tra toàn bộ yêu cầu bảo mật theo đề bài:
   ✓ Bit-flipping resistance (AES-GCM)
   ✓ Server-side compromise (server never holds plaintext)
   ✓ Audit Logging
-
-Cách dùng:
-  python security_audit.py                         # test localhost:5000
-  python security_audit.py https://your.railway.app
 """
 import sys
 import json
-import time
 import base64
 import hashlib
 import secrets
@@ -46,7 +40,7 @@ warnings = 0
 results = []
 
 
-def _req(method, path, data=None, token=None, expect_status=None):
+def _req(method, path, data=None, token=None, expect_status=None, return_cookie=False):
     url = BASE_URL + path
     headers = {'Content-Type': 'application/json'}
     if token:
@@ -55,15 +49,29 @@ def _req(method, path, data=None, token=None, expect_status=None):
     req = urllib.request.Request(url, data=body, headers=headers, method=method)
     try:
         with urllib.request.urlopen(req, timeout=10) as r:
-            return r.status, json.loads(r.read())
+            status, parsed = r.status, json.loads(r.read())
+            cookie_token = _extract_cookie_token(r.headers.get_all('Set-Cookie') or [])
     except urllib.error.HTTPError as e:
         try:
-            body = json.loads(e.read())
+            parsed = json.loads(e.read())
         except Exception:
-            body = {}
-        return e.code, body
+            parsed = {}
+        status, cookie_token = e.code, _extract_cookie_token(e.headers.get_all('Set-Cookie') or [])
     except Exception as ex:
-        return 0, {'error': str(ex)}
+        status, parsed, cookie_token = 0, {'error': str(ex)}, None
+
+    if return_cookie:
+        return status, parsed, cookie_token
+    return status, parsed
+
+
+def _extract_cookie_token(set_cookie_headers):
+    for h in set_cookie_headers:
+        for part in h.split(';'):
+            part = part.strip()
+            if part.startswith('sim_token='):
+                return part[len('sim_token='):]
+    return None
 
 
 def check(name, condition, detail='', warn=False):
@@ -112,16 +120,15 @@ def _fake_jwk_ecdsa():
 
 def _register_user(username, password='Test@1234'):
     device_id = _fake_device_id()
-    status, body = _req('POST', '/api/auth/register', {
+    status, body, token = _req('POST', '/api/auth/register', {
         'username': username,
-        'email': f'{username}@test.local',
         'password': password,
         'device_id': device_id,
         'device_name': 'AuditBot',
         'ecdsa_public_key': _fake_jwk_ecdsa(),
         'ecdh_public_key':  _fake_jwk_ecdh(),
-    })
-    return status, body, device_id
+    }, return_cookie=True)
+    return status, body, device_id, token
 
 
 # ════════════════════════════════════════════════
@@ -146,35 +153,28 @@ ts = secrets.token_hex(4)
 alice_user = f'alice_{ts}'
 bob_user   = f'bob_{ts}'
 
-status, body, alice_device = _register_user(alice_user)
+status, body, alice_device, alice_token = _register_user(alice_user)
 check('Alice registration succeeds (201)', status == 201, f'status={status}')
-check('Registration returns JWT immediately (no email needed)',
-      body.get('token') is not None, f'token present={body.get("token") is not None}')
+check('Registration sets sim_token HttpOnly auth cookie',
+      alice_token is not None, f'cookie present={alice_token is not None}')
 check('Registration returns user object', 'user' in body, str(body.get('user')))
 
-alice_token = body.get('token')
-alice_user_obj = body.get('user', {})
-check('User is auto-verified (is_email_verified=True)',
-      alice_user_obj.get('verified') == True, f'verified={alice_user_obj.get("verified")}')
-
-status, body, bob_device = _register_user(bob_user)
+status, body, bob_device, bob_token = _register_user(bob_user)
 check('Bob registration succeeds', status == 201, f'status={status}')
-bob_token = body.get('token')
 
 # Duplicate username
-status, body, _ = _register_user(alice_user)
+status, body, _, _ = _register_user(alice_user)
 check('Duplicate username rejected (409)', status == 409,
       f'status={status} — {"correct" if status==409 else "VULN: allows duplicate usernames!"}')
 
 # Weak password
-status, body, _ = _req('POST', '/api/auth/register', {
-    'username': f'weak_{ts}', 'email': f'weak_{ts}@t.local',
+status, body = _req('POST', '/api/auth/register', {
+    'username': f'weak_{ts}',
     'password': '123', 'device_id': _fake_device_id(),
     'device_name': 'Test',
     'ecdsa_public_key': _fake_jwk_ecdsa(),
     'ecdh_public_key':  _fake_jwk_ecdh(),
-}), None, None
-status = status[0]
+})
 check('Weak password (<8 chars) rejected (400)', status == 400,
       f'status={status} — {"correct" if status==400 else "VULN: accepts weak passwords!"}')
 
@@ -226,8 +226,8 @@ check('Wrong password rejected (401)', status == 401,
       f'status={status} — {"correct" if status==401 else "CRITICAL VULN: accepts wrong password!"}')
 
 check('Login error message is generic (no username enumeration)',
-      'Invalid username or password' in body.get('error', ''),
-      f'message="{body.get("error","")}"')
+      'Invalid username or password' in body.get('detail', ''),
+      f'message="{body.get("detail","")}"')
 
 status, body = _req('POST', '/api/auth/login', {
     'username': f'nonexistent_{ts}',
@@ -238,8 +238,8 @@ status, body = _req('POST', '/api/auth/login', {
     'ecdh_public_key':  _fake_jwk_ecdh(),
 })
 check('Non-existent user returns same error as wrong password (anti-enumeration)',
-      'Invalid username or password' in body.get('error', ''),
-      f'message="{body.get("error","")}"')
+      'Invalid username or password' in body.get('detail', ''),
+      f'message="{body.get("detail","")}"')
 
 # ════════════════════════════════════════════════
 section('5. E2EE VERIFICATION — Server Never Sees Plaintext')
@@ -417,10 +417,8 @@ section('12. CONTACT VERIFICATION (Out-of-Band Key Check)')
 ts2 = secrets.token_hex(4)
 alice2_user = f'alice2_{ts2}'
 bob2_user   = f'bob2_{ts2}'
-_, alice2_body, _ = _register_user(alice2_user)
-_, bob2_body,   _ = _register_user(bob2_user)
-alice2_token = alice2_body.get('token')
-bob2_token   = bob2_body.get('token')
+_, alice2_body, _, alice2_token = _register_user(alice2_user)
+_, bob2_body,   _, bob2_token   = _register_user(bob2_user)
 
 if alice2_token and bob2_token:
     status, users = _req('GET', f'/api/chat/users?q={bob2_user}', token=alice2_token)
@@ -457,18 +455,17 @@ section('14. SECURITY HEADERS CHECK')
 try:
     import urllib.request as ur
     with ur.urlopen(BASE_URL + '/login', timeout=5) as r:
-        headers = dict(r.headers)
-        header_str = str(headers).lower()
+        headers = {k.lower(): v for k, v in r.headers.items()}
 
     check('Content-Security-Policy header present',
-          'content-security-policy' in header_str,
-          f'CSP={"present" if "content-security-policy" in header_str else "MISSING"}')
+          'content-security-policy' in headers,
+          f'CSP={"present" if "content-security-policy" in headers else "MISSING"}')
     check('X-Content-Type-Options header present',
-          'x-content-type-options' in header_str,
-          f'value={headers.get("X-Content-Type-Options","MISSING")}')
+          'x-content-type-options' in headers,
+          f'value={headers.get("x-content-type-options","MISSING")}')
     check('X-Frame-Options header present',
-          'x-frame-options' in header_str,
-          f'value={headers.get("X-Frame-Options","MISSING")}')
+          'x-frame-options' in headers,
+          f'value={headers.get("x-frame-options","MISSING")}')
 except Exception as ex:
     check('Security headers check', False, str(ex), warn=True)
 

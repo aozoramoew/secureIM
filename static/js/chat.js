@@ -397,6 +397,27 @@ async function onKeyRotationRequired(data) {
   }
 }
 
+// ── Self-destruct timer ────────────────────────────────────────────
+
+let _selectedTimerSeconds = 0;
+
+const TIMER_LABELS = { 0: '⏱️', 60: '1m', 300: '5m', 3600: '1h', 86400: '24h' };
+
+function setSelectedTimer(seconds) {
+  _selectedTimerSeconds = seconds;
+  const btn = document.getElementById('timer-btn');
+  if (btn) {
+    btn.textContent = TIMER_LABELS[seconds] || '⏱️';
+    btn.classList.toggle('active', seconds > 0);
+    btn.title = seconds > 0
+      ? `Self-destruct: ${TIMER_LABELS[seconds]} (click to change)`
+      : 'Self-destruct timer';
+  }
+  document.querySelectorAll('.timer-option').forEach(opt => {
+    opt.classList.toggle('active', parseInt(opt.dataset.value) === seconds);
+  });
+}
+
 // ── Send Message ─────────────────────────────────────────────────
 
 let currentAttachment = null;
@@ -538,9 +559,8 @@ async function _sendMessageInner() {
       }
     }
 
-    // Self-destruct: read expires_seconds from the selector in the input bar
-    const timerSel = document.getElementById('timer-select');
-    const expiresSec = timerSel ? parseInt(timerSel.value) || 0 : 0;
+    // Self-destruct: read expires_seconds from the timer popup selection
+    const expiresSec = _selectedTimerSeconds;
 
     socket.emit('send_message', {
       session_id:          activeConversation.sessionId,
@@ -1300,6 +1320,28 @@ document.addEventListener('DOMContentLoaded', () => {
     document.addEventListener('click', e => {
       if (!emojiPicker.contains(e.target) && !emojiBtn.contains(e.target)) {
         emojiPicker.style.display = 'none';
+      }
+    });
+  }
+
+  // ── Self-destruct timer popup ────────────────────────────────
+  const timerBtn = document.getElementById('timer-btn');
+  const timerMenu = document.getElementById('timer-menu');
+  if (timerBtn && timerMenu) {
+    setSelectedTimer(0);
+    timerBtn.addEventListener('click', (e) => {
+      e.stopPropagation();
+      timerMenu.style.display = timerMenu.style.display === 'none' ? 'flex' : 'none';
+    });
+    timerMenu.querySelectorAll('.timer-option').forEach(opt => {
+      opt.addEventListener('click', () => {
+        setSelectedTimer(parseInt(opt.dataset.value));
+        timerMenu.style.display = 'none';
+      });
+    });
+    document.addEventListener('click', e => {
+      if (!timerMenu.contains(e.target) && !timerBtn.contains(e.target)) {
+        timerMenu.style.display = 'none';
       }
     });
   }

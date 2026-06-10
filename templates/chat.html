@@ -132,13 +132,17 @@
           <textarea id="message-input" placeholder="Send an encrypted message…" rows="1"></textarea>
           <button id="emoji-btn" class="icon-btn emoji-btn" title="Emojis">😊</button>
         </div>
-        <select id="timer-select" class="timer-select" title="Self-destruct timer">
-          <option value="0">No timer</option>
-          <option value="60">1 min</option>
-          <option value="300">5 min</option>
-          <option value="3600">1 hr</option>
-          <option value="86400">24 hr</option>
-        </select>
+        <div class="timer-control">
+          <button id="timer-btn" class="icon-btn input-icon-btn" title="Self-destruct timer">⏱️</button>
+          <div id="timer-menu" class="timer-menu" style="display: none;">
+            <div class="timer-menu-header">Self-destruct</div>
+            <button class="timer-option active" data-value="0">Off</button>
+            <button class="timer-option" data-value="60">1 minute</button>
+            <button class="timer-option" data-value="300">5 minutes</button>
+            <button class="timer-option" data-value="3600">1 hour</button>
+            <button class="timer-option" data-value="86400">24 hours</button>
+          </div>
+        </div>
         <button id="send-btn" class="send-btn" title="Send message">➤</button>
       </div>
     </div>

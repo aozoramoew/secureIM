@@ -25,7 +25,7 @@ if __name__ == '__main__':
     print('=' * 60)
     uvicorn.run(
         'run:app',
-        host='0.0.0.0',
+        host='0.0.0.0',  # nosec B104 - intended for containerized deployment (Docker/Railway)
         port=settings.PORT,
         reload=settings.DEBUG,
         log_level='info',

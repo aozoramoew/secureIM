@@ -407,8 +407,23 @@ function clearAttachment() {
   document.getElementById('media-preview').style.display = 'none';
   document.getElementById('media-preview-img').style.display = 'none';
   document.getElementById('media-preview-video').style.display = 'none';
+  document.getElementById('media-preview-file').style.display = 'none';
   document.getElementById('media-preview-img').src = '';
   document.getElementById('media-preview-video').src = '';
+  document.getElementById('media-preview-file').textContent = '';
+}
+
+// Extensions that must never be sent as attachments — executable or script
+// content that a recipient's OS/browser could run if opened directly.
+const BLOCKED_FILE_EXTENSIONS = new Set([
+  'exe', 'bat', 'cmd', 'com', 'msi', 'msp', 'scr', 'ps1', 'psm1', 'vbs', 'vbe',
+  'js', 'jse', 'wsf', 'wsh', 'jar', 'app', 'sh', 'bash', 'apk', 'deb', 'rpm',
+  'dll', 'sys', 'cpl', 'gadget', 'reg', 'lnk', 'html', 'htm', 'svg',
+]);
+
+function getFileExtension(filename) {
+  const idx = filename.lastIndexOf('.');
+  return idx === -1 ? '' : filename.slice(idx + 1).toLowerCase();
 }
 
 let _sending = false;
@@ -548,9 +563,11 @@ async function _sendMessageInner() {
       optimistic.content_type = 'media';
       const blob = new Blob([fileAttach.buffer], { type: fileAttach.file.type });
       optimistic.mediaUrl = URL.createObjectURL(blob);
-      optimistic.mediaType = fileAttach.file.type.startsWith('image') ? 'image' : 'video';
+      optimistic.mediaType = mediaTypeFor(fileAttach.file.type);
       optimistic.mediaMime = fileAttach.file.type;
       optimistic.mediaData = SecureCrypto.bufToB64(fileAttach.buffer);
+      optimistic.fileName = fileAttach.file.name;
+      optimistic.fileSize = fileAttach.file.size;
     }
 
     renderMessage(optimistic, true);
@@ -609,9 +626,11 @@ async function onReceiveMessage(msg) {
           mediaObj = {
             content_type: 'media',
             mediaUrl:  URL.createObjectURL(blob),
-            mediaType: metadata.mime.startsWith('image') ? 'image' : 'video',
+            mediaType: mediaTypeFor(metadata.mime),
             mediaMime: metadata.mime,
             mediaData: SecureCrypto.bufToB64(fileBuffer),
+            fileName:  metadata.filename || 'file',
+            fileSize:  fileBuffer.byteLength,
             plaintext: myPayload.caption || null,
           };
         } else {
@@ -764,15 +783,43 @@ function buildMessageEl(msg, isMine) {
         vid.src = msg.mediaUrl;
         vid.controls = true;
         bubble.appendChild(vid);
+      } else {
+        // Generic file attachment — offer it as a download, never inline-rendered
+        // (avoids the browser executing/interpreting HTML, SVG, etc.).
+        const fileBox = document.createElement('a');
+        fileBox.className = 'msg-file';
+        fileBox.href = msg.mediaUrl;
+        fileBox.download = msg.fileName || 'file';
+        fileBox.target = '_blank';
+        fileBox.rel = 'noopener noreferrer';
+
+        const icon = document.createElement('span');
+        icon.className = 'msg-file-icon';
+        icon.textContent = '📎';
+
+        const info = document.createElement('span');
+        info.className = 'msg-file-info';
+
+        const name = document.createElement('span');
+        name.className = 'msg-file-name';
+        name.textContent = msg.fileName || 'file';
+
+        const size = document.createElement('span');
+        size.className = 'msg-file-size';
+        size.textContent = formatFileSize(msg.fileSize);
+
+        info.append(name, size);
+        fileBox.append(icon, info);
+        bubble.appendChild(fileBox);
       }
     }
   }
 
-  // Message body — textContent is XSS-safe
+  // Message body — built from text nodes / anchors only, never innerHTML, so it stays XSS-safe
   if (msg.plaintext) {
     const body = document.createElement('div');
-    body.className   = 'msg-body';
-    body.textContent = msg.plaintext;
+    body.className = 'msg-body';
+    linkifyText(body, msg.plaintext);
     bubble.appendChild(body);
   } else if (!msg.content_type) {
     const body = document.createElement('div');
@@ -907,6 +954,47 @@ function clearMessages() {
 function _asUTC(isoStr) {
   if (!isoStr) return isoStr;
   return isoStr.endsWith('Z') || /[+-]\d{2}:\d{2}$/.test(isoStr) ? isoStr : isoStr + 'Z';
+}
+
+// Classifies an attachment by MIME type for rendering: inline image, inline
+// video, or a generic downloadable file bubble for everything else.
+function mediaTypeFor(mime) {
+  if (mime?.startsWith('image/')) return 'image';
+  if (mime?.startsWith('video/')) return 'video';
+  return 'file';
+}
+
+function formatFileSize(bytes) {
+  if (!bytes && bytes !== 0) return '';
+  if (bytes < 1024) return `${bytes} B`;
+  if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`;
+  return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
+}
+
+// Splits text on http(s)/www URLs and appends text nodes and <a> elements to
+// `container`. Builds DOM nodes directly (no innerHTML) so message content
+// can never be interpreted as HTML, even though links become clickable.
+const URL_PATTERN = /(https?:\/\/[^\s<>"]+|www\.[^\s<>"]+)/gi;
+function linkifyText(container, text) {
+  let lastIndex = 0;
+  for (const match of text.matchAll(URL_PATTERN)) {
+    const url = match[0];
+    const start = match.index;
+    if (start > lastIndex) {
+      container.appendChild(document.createTextNode(text.slice(lastIndex, start)));
+    }
+    const a = document.createElement('a');
+    a.href = url.startsWith('www.') ? `https://${url}` : url;
+    a.textContent = url;
+    a.target = '_blank';
+    a.rel = 'noopener noreferrer';
+    a.className = 'msg-link';
+    container.appendChild(a);
+    lastIndex = start + url.length;
+  }
+  if (lastIndex < text.length) {
+    container.appendChild(document.createTextNode(text.slice(lastIndex)));
+  }
 }
 
 function escapeHtml(s) {
@@ -1222,6 +1310,7 @@ document.addEventListener('DOMContentLoaded', () => {
   const previewBox = document.getElementById('media-preview');
   const previewImg = document.getElementById('media-preview-img');
   const previewVid = document.getElementById('media-preview-video');
+  const previewFile = document.getElementById('media-preview-file');
   const previewClose = document.getElementById('media-preview-close');
 
   if (attachBtn && fileInput) {
@@ -1229,6 +1318,13 @@ document.addEventListener('DOMContentLoaded', () => {
     fileInput.addEventListener('change', async (e) => {
       const file = e.target.files[0];
       if (!file) return;
+
+      const ext = getFileExtension(file.name);
+      if (BLOCKED_FILE_EXTENSIONS.has(ext)) {
+        showAlert(`⚠️ Files of type ".${ext}" cannot be sent for security reasons.`, 'warning');
+        fileInput.value = '';
+        return;
+      }
       if (file.size > 5 * 1024 * 1024) {
         showAlert('⚠️ File too large. Max 5MB allowed.', 'warning');
         fileInput.value = '';
@@ -1236,15 +1332,17 @@ document.addEventListener('DOMContentLoaded', () => {
       }
       const buffer = await file.arrayBuffer();
       currentAttachment = { file, buffer };
-      
-      const isImg = file.type.startsWith('image');
-      previewImg.style.display = isImg ? 'block' : 'none';
-      previewVid.style.display = !isImg ? 'block' : 'none';
-      
+
+      const mediaType = mediaTypeFor(file.type);
+      previewImg.style.display = mediaType === 'image' ? 'block' : 'none';
+      previewVid.style.display = mediaType === 'video' ? 'block' : 'none';
+      previewFile.style.display = mediaType === 'file' ? 'flex' : 'none';
+
       const blobUrl = URL.createObjectURL(file);
-      if (isImg) previewImg.src = blobUrl;
-      else previewVid.src = blobUrl;
-      
+      if (mediaType === 'image') previewImg.src = blobUrl;
+      else if (mediaType === 'video') previewVid.src = blobUrl;
+      else previewFile.textContent = `📎 ${file.name} (${formatFileSize(file.size)})`;
+
       previewBox.style.display = 'flex';
     });
     previewClose?.addEventListener('click', clearAttachment);

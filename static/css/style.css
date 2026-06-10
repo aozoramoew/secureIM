@@ -621,6 +621,8 @@ html, body {
   word-break: break-word; white-space: pre-wrap;
 }
 .msg-body.deleted-msg { color: var(--text-3); font-style: italic; font-size: 13px; }
+.msg-link { color: #4ea1ff; text-decoration: underline; word-break: break-all; }
+.message.mine .msg-link { color: #cfe8ff; }
 
 .msg-media {
   max-width: 100%; max-height: 300px; border-radius: 8px; margin-bottom: 6px;
@@ -630,6 +632,22 @@ html, body {
   max-width: 100%; max-height: 300px; border-radius: 8px; margin-bottom: 6px;
   display: block; background: #000;
 }
+.msg-file {
+  display: flex; align-items: center; gap: 10px;
+  padding: 10px 12px; margin-bottom: 6px; border-radius: 8px;
+  background: rgba(0,0,0,0.15); text-decoration: none; color: inherit;
+  max-width: 100%;
+}
+.msg-file:hover { background: rgba(0,0,0,0.25); }
+.msg-file-icon { font-size: 22px; flex-shrink: 0; }
+.msg-file-info {
+  display: flex; flex-direction: column; min-width: 0;
+}
+.msg-file-name {
+  font-size: 13px; font-weight: 500; white-space: nowrap;
+  overflow: hidden; text-overflow: ellipsis; max-width: 220px;
+}
+.msg-file-size { font-size: 11px; color: var(--text-3); }
 
 .msg-meta {
   display: flex; align-items: center; gap: 5px;
@@ -700,6 +718,13 @@ html, body {
   transition: var(--trans);
 }
 .media-preview-close:hover { background: rgba(248,113,113,0.9); }
+.media-preview-content:has(.media-preview-file[style*="flex"]) {
+  max-width: 280px; max-height: none; padding: 8px 28px 8px 12px;
+  justify-content: flex-start;
+}
+.media-preview-file {
+  font-size: 13px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+}
 
 .chat-input-bar {
   padding: 14px 20px; border-top: 1px solid var(--border);

@@ -115,7 +115,8 @@ def _audit(db: Session, event_type: str, request: Request,
         db.add(entry)
         db.commit()
     except Exception:
-        pass
+        db.rollback()
+        log.warning('Failed to write audit log entry (event_type=%s)', event_type, exc_info=True)
 
 
 # ── Pydantic request models ────────────────────────────────────────

@@ -700,11 +700,13 @@ async function deleteMessage(msgId, type) {
   }
 }
 
-function onMessageDeleted(data) {
-  const { message_id, type } = data;
-  const el = document.getElementById(`msg-${message_id}`);
-  if (!el) return;
-  if (type === 'deep' || type === 'expired') {
+// Marks a message as expired/deleted in the DOM (if rendered) and in
+// local storage for the conversation it belongs to. Shared by the live
+// 'message_deleted' socket event and the client-side countdown reaching 0,
+// so expiry doesn't require a server round-trip or page reload to show.
+function _markMessageExpiredLocally(messageId, type, convId) {
+  const el = document.getElementById(`msg-${messageId}`);
+  if (el) {
     const body = el.querySelector('.msg-body');
     if (body) {
       body.textContent = type === 'expired' ? '⏱️ Message expired.' : '🗑️ This message was deleted.';
@@ -712,10 +714,17 @@ function onMessageDeleted(data) {
     }
     el.querySelector('.msg-actions')?.remove();
     el.querySelector('.msg-timer')?.remove();
-    if (currentPassword) {
-      const convId = getActiveConvId();
-      SecureStorage.markDeepDeleted(currentPassword, convId, message_id);
-    }
+    el.querySelector('.msg-media, .msg-media-video, .msg-file')?.remove();
+  }
+  if (currentPassword) {
+    SecureStorage.markDeepDeleted(currentPassword, convId || getActiveConvId(), messageId);
+  }
+}
+
+function onMessageDeleted(data) {
+  const { message_id, type } = data;
+  if (type === 'deep' || type === 'expired') {
+    _markMessageExpiredLocally(message_id, type, getActiveConvId());
   }
 }
 
@@ -912,11 +921,15 @@ function buildMessageEl(msg, isMine) {
   }
   bubble.appendChild(meta);
 
-  // Self-destruct countdown
+  // Self-destruct countdown — when it reaches 0, mark the message as
+  // expired immediately client-side rather than waiting for the server's
+  // sweep + 'message_deleted' event (up to 30s) or a page reload.
   if (msg.expires_at) {
     const timerEl = document.createElement('div');
     timerEl.className = 'msg-timer';
     const expiresMs = new Date(_asUTC(msg.expires_at)).getTime();
+    const convId = getActiveConvId();
+    const msgId = msg.id;
     const updateTimer = () => {
       const remaining = Math.max(0, Math.floor((expiresMs - Date.now()) / 1000));
       if (remaining === 0) { timerEl.textContent = '⏱️ Expired'; return; }
@@ -927,7 +940,10 @@ function buildMessageEl(msg, isMine) {
     const interval = setInterval(() => {
       const remaining = Math.max(0, Math.floor((expiresMs - Date.now()) / 1000));
       updateTimer();
-      if (remaining === 0) clearInterval(interval);
+      if (remaining === 0) {
+        clearInterval(interval);
+        _markMessageExpiredLocally(msgId, 'expired', convId);
+      }
     }, 1000);
     bubble.appendChild(timerEl);
   }

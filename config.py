@@ -2,11 +2,14 @@
 Application configuration — reads from environment variables with safe defaults.
 Set these as Railway environment variables (or a local .env file) for production.
 """
+import logging
 import os
+import secrets as _secrets
 from datetime import timedelta
 from dotenv import load_dotenv
 
 load_dotenv()
+_log = logging.getLogger(__name__)
 
 
 def _fix_db_url(url: str) -> str:
@@ -16,11 +19,24 @@ def _fix_db_url(url: str) -> str:
     return url
 
 
+def _get_secret(env_var: str) -> str:
+    """Return the secret from env, or generate a random one and warn loudly."""
+    value = os.environ.get(env_var)
+    if not value:
+        value = _secrets.token_hex(32)
+        _log.warning(
+            "⚠️  %s is not set! Using a random secret — sessions will be "
+            "invalidated on every restart. Set %s in your environment for production.",
+            env_var, env_var,
+        )
+    return value
+
+
 class Settings:
     # ── Core secrets — generate with: python -c "import secrets; print(secrets.token_hex(32))"
-    SECRET_KEY     = os.environ.get('SECRET_KEY',     'CHANGE-ME-IN-PRODUCTION')
-    JWT_SECRET_KEY = os.environ.get('JWT_SECRET_KEY', 'CHANGE-ME-JWT-IN-PRODUCTION')
-    DEBUG          = os.environ.get('DEBUG', 'true').lower() == 'true'
+    SECRET_KEY     = _get_secret('SECRET_KEY')
+    JWT_SECRET_KEY = _get_secret('JWT_SECRET_KEY')
+    DEBUG          = os.environ.get('DEBUG', 'false').lower() == 'true'
 
     # ── Database — defaults to local SQLite, set DATABASE_URL for PostgreSQL on Railway
     DATABASE_URL = _fix_db_url(
@@ -31,8 +47,15 @@ class Settings:
     BASE_URL = os.environ.get('BASE_URL', 'http://localhost:8000')
     PORT     = int(os.environ.get('PORT', 8000))
 
+    # ── CORS — comma-separated origins; defaults to self only
+    ALLOWED_ORIGINS = [
+        o.strip() for o in
+        os.environ.get('ALLOWED_ORIGINS', f'http://localhost:{os.environ.get("PORT", 8000)}').split(',')
+        if o.strip()
+    ]
+
     # ── JWT lifetime
-    JWT_EXPIRY = timedelta(days=30)
+    JWT_EXPIRY = timedelta(days=7)
 
     # ── E2EE session — rotate keys every N messages for forward secrecy
     KEY_ROTATION_THRESHOLD = int(os.environ.get('KEY_ROTATION_THRESHOLD', 100))

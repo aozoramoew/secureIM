@@ -6,6 +6,8 @@ that wraps the FastAPI app (handles both HTTP and WebSocket traffic).
 import os
 import socketio as _sio_lib
 
+from config import settings
+
 from fastapi import FastAPI
 from fastapi.staticfiles import StaticFiles
 from fastapi.middleware.cors import CORSMiddleware
@@ -73,13 +75,13 @@ def create_app():
         redoc_url=None,
     )
 
-    # CORS — restrict in production via env vars
+    # CORS — restrict origins; configure via ALLOWED_ORIGINS env var
     app.add_middleware(
         CORSMiddleware,
-        allow_origins=['*'],
+        allow_origins=settings.ALLOWED_ORIGINS,
         allow_credentials=True,
-        allow_methods=['*'],
-        allow_headers=['*'],
+        allow_methods=['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'],
+        allow_headers=['Authorization', 'Content-Type'],
     )
 
     # Security headers

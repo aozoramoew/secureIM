@@ -22,6 +22,7 @@ import logging
 import secrets
 from datetime import datetime
 from typing import Optional
+from config import settings
 
 from fastapi import APIRouter, Depends, HTTPException, Request, Response
 from pydantic import BaseModel
@@ -49,7 +50,7 @@ def _set_auth_cookie(response: Response, token: str) -> None:
         value=token,
         max_age=_COOKIE_MAX_AGE,
         httponly=True,
-        secure=False,   # set True in production (HTTPS only)
+        secure=not settings.DEBUG,  # True in production (HTTPS only)
         samesite='strict',
         path='/',
     )
@@ -186,7 +187,7 @@ def register(request: Request, body: RegisterBody,
     except Exception as exc:
         db.rollback()
         log.exception('[register] DB error for username=%s: %s', username, exc)
-        raise HTTPException(status_code=500, detail=f'Registration failed: {exc}')
+        raise HTTPException(status_code=500, detail='Registration failed due to a server error')
 
     token = generate_jwt(user.id, device_id)
     _set_auth_cookie(response, token)

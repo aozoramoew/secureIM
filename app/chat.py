@@ -475,9 +475,12 @@ def get_session(
     auth=Depends(get_current_user_and_device),
     db: Session = Depends(get_db),
 ):
+    current_user, _ = auth
     sess = db.get(ChatSession, session_id)
     if not sess:
         raise HTTPException(status_code=404, detail='Session not found')
+    if current_user.id not in (sess.user_a_id, sess.user_b_id):
+        raise HTTPException(status_code=403, detail='Forbidden')
     return {'session': sess.to_dict()}
 
 
@@ -493,6 +496,8 @@ async def update_session(
         raise HTTPException(status_code=404, detail='Session not found')
 
     current_user, _ = auth
+    if current_user.id not in (sess.user_a_id, sess.user_b_id):
+        raise HTTPException(status_code=403, detail='Forbidden')
     sess.ephemeral_pub_b = body.ephemeral_pub
     sess.ephemeral_sig_b = body.ephemeral_sig
     db.commit()

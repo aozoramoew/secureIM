@@ -74,6 +74,16 @@ def create_app():
     def health():
         return {'status': 'ok', 'service': 'SecureIM'}
 
+    # Temporary debug endpoint — remove after WAF IP debugging
+    if settings.DEBUG:
+        from fastapi import Request as _Request
+        @app.get('/api/debug/headers')
+        async def debug_headers(request: _Request):
+            return {
+                'client': request.client,
+                'headers': dict(request.headers),
+            }
+
     # ── Background scheduler ───────────────────────────────────────
     from app.scheduler import start_scheduler
     start_scheduler()

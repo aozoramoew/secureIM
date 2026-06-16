@@ -10,7 +10,11 @@
       "Bash(python -c ' *)",
       "Bash(curl -s -o /dev/null -w \"%{http_code}\\\\n\" http://localhost:8000/login --max-time 3)",
       "Bash(tasklist //FI \"IMAGENAME eq python.exe\")",
-      "Bash(netstat -ano)"
+      "Bash(netstat -ano)",
+      "Bash(xargs wc -l)",
+      "Bash(curl -s --max-time 10 https://ml-waf-production.up.railway.app/health)",
+      "Bash(curl -s --max-time 10 https://ml-waf-production.up.railway.app/analyze -X POST -H \"Content-Type: application/json\" -d '{\"method\":\"GET\",\"url\":\"http://test.com/login\",\"headers\":{},\"body\":\"\",\"ip\":\"1.2.3.4\"}')",
+      "Bash(curl -s --max-time 10 https://web-production-ce7b.up.railway.app/api/health)"
     ]
   }
 }

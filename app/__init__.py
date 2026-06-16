@@ -47,6 +47,11 @@ def create_app():
     from app.security import SecurityHeadersMiddleware
     app.add_middleware(SecurityHeadersMiddleware)
 
+    # ML-WAF — enabled via MLWAF_ENABLED=true env var
+    if settings.MLWAF_ENABLED:
+        from app.waf import MLWafMiddleware
+        app.add_middleware(MLWafMiddleware)
+
     # Static files (/static/*)
     app.mount('/static', StaticFiles(directory=_static_dir), name='static')
 

@@ -6,14 +6,40 @@ services:
     environment:
       - FLASK_ENV=production
       - SOCKETIO_ASYNC_MODE=gevent
+      - MLWAF_ENABLED=true
+      - MLWAF_URL=http://mlwaf:8001
     volumes:
       - db_data:/app/instance       # persist SQLite DB
     expose:
       - "5000"
     depends_on:
       - redis
+      - mlwaf
     healthcheck:
       test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:5000/login')"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+
+  mlwaf:
+    image: python:3.11-slim
+    restart: unless-stopped
+    working_dir: /app
+    volumes:
+      - ./ml-waf:/app
+      - waf_models:/app/models
+    command: >
+      bash -c "pip install -r requirements.txt -q &&
+               python -m ml.train &&
+               uvicorn app.main:app --host 0.0.0.0 --port 8001"
+    expose:
+      - "8001"
+    environment:
+      - CROWDSEC_API_KEY=${CROWDSEC_API_KEY:-}
+    networks:
+      - default
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8001/health"]
       interval: 30s
       timeout: 10s
       retries: 3
@@ -40,3 +66,4 @@ services:
 volumes:
   db_data:
   redis_data:
+  waf_models:

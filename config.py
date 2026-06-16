@@ -64,5 +64,12 @@ class Settings:
     RATELIMIT_AUTH_LOGIN    = os.environ.get('RATELIMIT_AUTH_LOGIN',    '10/minute')
     RATELIMIT_AUTH_REGISTER = os.environ.get('RATELIMIT_AUTH_REGISTER', '5/hour')
 
+    # ── ML-WAF sidecar
+    MLWAF_URL = os.environ.get('MLWAF_URL', 'http://localhost:8001')
+    MLWAF_ENABLED = (
+        os.environ.get('MLWAF_ENABLED', 'false').lower() == 'true'
+    )
+    MLWAF_TIMEOUT = float(os.environ.get('MLWAF_TIMEOUT', '0.5'))
+
 
 settings = Settings()

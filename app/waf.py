@@ -124,9 +124,11 @@ class MLWafMiddleware:
         }
         method = scope.get('method', 'GET')
         query = scope.get('query_string', b'').decode('latin-1')
-        scheme = scope.get('scheme', 'http')
-        server = scope.get('server') or ('localhost', 80)
-        full_url = f"{scheme}://{server[0]}:{server[1]}{path}"
+        # Use the Host header so WAF sees the public domain, not the
+        # internal bind address (0.0.0.0 / 100.64.x.x) which trips SSRF rules.
+        host = raw_headers.get('host', 'localhost')
+        scheme = raw_headers.get('x-forwarded-proto', scope.get('scheme', 'https'))
+        full_url = f"{scheme}://{host}{path}"
         if query:
             full_url += f'?{query}'
 

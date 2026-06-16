@@ -12,6 +12,7 @@ Behaviour:
 - Socket.IO polling (/socket.io/) passes through — the WAF analyzes these
   only if MLWAF_INSPECT_SOCKETIO=true (default off, high-volume path).
 """
+import ipaddress
 import json
 import logging
 import os
@@ -23,6 +24,24 @@ from config import settings
 _log = logging.getLogger(__name__)
 
 _INSPECT_SOCKETIO = os.environ.get('MLWAF_INSPECT_SOCKETIO', 'false').lower() == 'true'
+
+# Private / carrier-grade NAT ranges — skip WAF for internal traffic
+# (health checks, load balancers, Railway internal network 100.64.0.0/10)
+_TRUSTED_NETS = [
+    ipaddress.ip_network('127.0.0.0/8'),
+    ipaddress.ip_network('10.0.0.0/8'),
+    ipaddress.ip_network('172.16.0.0/12'),
+    ipaddress.ip_network('192.168.0.0/16'),
+    ipaddress.ip_network('100.64.0.0/10'),  # RFC 6598 — Railway / Fly.io internal
+]
+
+
+def _is_internal(ip: str) -> bool:
+    try:
+        addr = ipaddress.ip_address(ip)
+        return any(addr in net for net in _TRUSTED_NETS)
+    except ValueError:
+        return False
 
 _403_HEADERS = [
     (b'content-type', b'application/json'),
@@ -59,6 +78,13 @@ class MLWafMiddleware:
             await self.app(scope, receive, send)
             return
 
+        # Skip internal / health-check traffic (load balancers, Railway probes).
+        client = scope.get('client')
+        ip = client[0] if client else '0.0.0.0'
+        if _is_internal(ip):
+            await self.app(scope, receive, send)
+            return
+
         # Buffer the request body so it can be forwarded to WAF and then
         # replayed to the actual application.
         body_chunks: list[bytes] = []
@@ -90,9 +116,6 @@ class MLWafMiddleware:
         full_url = f"{scheme}://{server[0]}:{server[1]}{path}"
         if query:
             full_url += f'?{query}'
-
-        client = scope.get('client')
-        ip = client[0] if client else '0.0.0.0'
 
         snapshot = {
             'method': method,

@@ -78,9 +78,22 @@ class MLWafMiddleware:
             await self.app(scope, receive, send)
             return
 
+        # Resolve the real client IP.
+        # On Railway/Fly/Heroku the actual client IP arrives in
+        # X-Forwarded-For; scope['client'] is the internal proxy address.
+        raw_headers = {
+            k.decode('latin-1').lower(): v.decode('latin-1')
+            for k, v in scope.get('headers', [])
+        }
+        xff = raw_headers.get('x-forwarded-for', '')
+        if xff:
+            # XFF is a comma-separated list; leftmost is the originating client.
+            ip = xff.split(',')[0].strip()
+        else:
+            client = scope.get('client')
+            ip = client[0] if client else '0.0.0.0'
+
         # Skip internal / health-check traffic (load balancers, Railway probes).
-        client = scope.get('client')
-        ip = client[0] if client else '0.0.0.0'
         if _is_internal(ip):
             await self.app(scope, receive, send)
             return

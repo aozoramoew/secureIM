@@ -38,9 +38,11 @@ for module_name, label in SCRIPTS:
     _common._results.clear()
 
     mod = importlib.import_module(module_name)
-    # summary() already printed inside each script; grab counts from _results
-    p = sum(1 for r in _common._results if r['ok'])
-    t = len(_common._results)
+    # summary() already printed inside each script; grab counts from _results.
+    # Exclude ok=None (429 rate-limited) — those are not WAF detection results.
+    scored = [r for r in _common._results if r['ok'] is not None]
+    p = sum(1 for r in scored if r['ok'])
+    t = len(scored)
     totals['passed'] += p
     totals['total']  += t
 

@@ -59,6 +59,17 @@ def req(method: str, path: str, data=None, headers: dict | None = None) -> tuple
 
 
 def report(label: str, status: int, expect_block: bool, payload: str = ''):
+    # 429 = secureIM's own slowapi rate limiter rejected the request before
+    # it ever reached the WAF or the route handler. It says nothing about
+    # whether the WAF would have detected this payload, so it must not be
+    # scored as either a correct or incorrect WAF detection — otherwise
+    # running the suite twice in quick succession silently inflates or
+    # deflates the score with results that have nothing to do with the WAF.
+    if status == 429:
+        print(f'  {YELLOW}⊘ RATE-LIMITED (429) — skipped, not a WAF result{RESET}  |  {label}')
+        _results.append({'label': label, 'status': status, 'ok': None, 'expect_block': expect_block})
+        return None
+
     blocked = status == 403
     if expect_block:
         ok = blocked
@@ -76,14 +87,17 @@ def report(label: str, status: int, expect_block: bool, payload: str = ''):
 
 
 def summary(section: str):
-    total  = len(_results)
-    passed = sum(1 for r in _results if r['ok'])
+    scored = [r for r in _results if r['ok'] is not None]
+    skipped = len(_results) - len(scored)
+    total  = len(scored)
+    passed = sum(1 for r in scored if r['ok'])
     print(f'\n{BOLD}{"─"*55}{RESET}')
-    print(f'{BOLD}{section} — {passed}/{total} correct detections{RESET}')
+    print(f'{BOLD}{section} — {passed}/{total} correct detections{RESET}'
+          + (f'  ({skipped} skipped: rate-limited)' if skipped else ''))
     if passed == total:
         print(f'{GREEN}All checks passed{RESET}')
     else:
-        missed = [r for r in _results if not r['ok']]
+        missed = [r for r in scored if not r['ok']]
         for r in missed:
             exp = 'block' if r['expect_block'] else 'allow'
             print(f'  {YELLOW}✗ expected {exp}: {r["label"]}{RESET}')

@@ -69,7 +69,7 @@ class Settings:
     MLWAF_ENABLED = (
         os.environ.get('MLWAF_ENABLED', 'false').lower() == 'true'
     )
-    MLWAF_TIMEOUT = float(os.environ.get('MLWAF_TIMEOUT', '0.5'))
+    MLWAF_TIMEOUT = float(os.environ.get('MLWAF_TIMEOUT', '2.0'))
 
 
 settings = Settings()

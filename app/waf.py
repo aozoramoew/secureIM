@@ -146,8 +146,8 @@ class MLWafMiddleware:
             attack_type = decision.get('attack_type')
             ref = decision.get('id')
             _log.warning(
-                'ML-WAF BLOCK | ip=%s method=%s path=%s attack=%s ref=%s snapshot=%s',
-                ip, method, path, attack_type, ref, snapshot,
+                'ML-WAF BLOCK | ip=%s method=%s path=%s attack=%s ref=%s',
+                ip, method, path, attack_type, ref,
             )
             body_bytes = _build_403(attack_type, ref)
             await send({

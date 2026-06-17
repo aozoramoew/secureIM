@@ -19,6 +19,7 @@ connection; the SocketIO client is given the token value once on connect.
 """
 import json
 import logging
+import re
 from datetime import datetime
 from typing import Optional
 from config import settings
@@ -159,6 +160,10 @@ def register(request: Request, body: RegisterBody,
     if len(username) < 3 or len(username) > 30:
         raise HTTPException(
             status_code=400, detail='Username must be 3–30 characters')
+    if not re.fullmatch(r'[a-z0-9_-]+', username):
+        raise HTTPException(
+            status_code=400,
+            detail='Username may only contain letters, numbers, "_" and "-"')
     if len(password) < 8:
         raise HTTPException(
             status_code=400, detail='Password must be at least 8 characters')

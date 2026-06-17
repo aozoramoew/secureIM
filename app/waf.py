@@ -16,6 +16,8 @@ import ipaddress
 import json
 import logging
 import os
+import time
+from collections import deque
 
 import httpx
 
@@ -24,6 +26,22 @@ from config import settings
 _log = logging.getLogger(__name__)
 
 _INSPECT_SOCKETIO = os.environ.get('MLWAF_INSPECT_SOCKETIO', 'false').lower() == 'true'
+
+# Cheap per-IP rate limit applied before any DB/WAF-sidecar work, so a flood
+# of malicious traffic can't starve the single event loop worker of CPU/IO
+# needed to service legitimate requests (incl. Socket.IO polling/handshakes).
+_RATE_LIMIT_REQUESTS = int(os.environ.get('MLWAF_RATE_LIMIT_REQUESTS', '200'))
+_RATE_LIMIT_WINDOW = float(os.environ.get('MLWAF_RATE_LIMIT_WINDOW', '10'))
+_request_log: dict[str, deque] = {}
+
+
+def _is_rate_limited(ip: str) -> bool:
+    now = time.monotonic()
+    bucket = _request_log.setdefault(ip, deque())
+    while bucket and now - bucket[0] > _RATE_LIMIT_WINDOW:
+        bucket.popleft()
+    bucket.append(now)
+    return len(bucket) > _RATE_LIMIT_REQUESTS
 
 # Private / carrier-grade NAT ranges — skip WAF for internal traffic
 # (health checks, load balancers, Railway internal network 100.64.0.0/10)
@@ -73,11 +91,6 @@ class MLWafMiddleware:
 
         path: str = scope.get('path', '')
 
-        # Optionally skip high-volume Socket.IO polling path.
-        if path.startswith('/socket.io') and not _INSPECT_SOCKETIO:
-            await self.app(scope, receive, send)
-            return
-
         # Resolve the real client IP.
         # On Railway/Fly/Heroku the actual client IP arrives in
         # X-Forwarded-For; scope['client'] is the internal proxy address.
@@ -95,6 +108,30 @@ class MLWafMiddleware:
 
         # Skip internal / health-check traffic (load balancers, Railway probes).
         if _is_internal(ip):
+            await self.app(scope, receive, send)
+            return
+
+        # Cheap per-IP flood guard — checked before any DB/WAF-sidecar work
+        # (incl. Socket.IO polling) so one noisy IP can't starve the single
+        # event loop worker of the CPU/IO legitimate clients need.
+        if _is_rate_limited(ip):
+            _log.warning('Rate limit exceeded | ip=%s path=%s', ip, path)
+            body_bytes = json.dumps({'error': 'Too many requests'}).encode()
+            await send({
+                'type': 'http.response.start',
+                'status': 429,
+                'headers': _403_HEADERS + [(b'content-length', str(len(body_bytes)).encode())],
+            })
+            await send({
+                'type': 'http.response.body',
+                'body': body_bytes,
+                'more_body': False,
+            })
+            return
+
+        # Optionally skip high-volume Socket.IO polling path (still subject
+        # to the flood guard above, just not the slower WAF-sidecar check).
+        if path.startswith('/socket.io') and not _INSPECT_SOCKETIO:
             await self.app(scope, receive, send)
             return
 
